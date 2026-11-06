@@ -1048,11 +1048,12 @@ fn downloads_dir() -> PathBuf {
     #[cfg(not(windows))]
     {
         if let Ok(home) = std::env::var("HOME") {
-            let d = PathBuf::from(home).join("Downloads");
+            let home = PathBuf::from(home);
+            let d = home.join("Downloads");
             if d.is_dir() {
                 return d;
             }
-            return PathBuf::from(home);
+            return home;
         }
     }
     std::env::temp_dir()
