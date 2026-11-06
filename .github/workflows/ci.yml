@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    name: 版本规则 + 构建（Linux）
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出（需要完整 tag 历史做 alpha 序号校验）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 版本规则反例自测
+        run: bash scripts/test-check-version.sh
+
+      - name: 版本文件校验
+        run: bash scripts/check-version.sh
+
+      - name: 构建
+        run: cargo build --release --locked
+
+      - name: 二进制内版本与版本文件一致
+        run: bash scripts/check-version.sh --binary ./target/release/berthio
+
+      - name: 内嵌前端存在
+        run: |
+          strings target/release/berthio | grep -q "berthio-app-bridge" || (echo "二进制里找不到内嵌前端" && exit 1)
+          test -f web/index.html
+          test -f web/app.js

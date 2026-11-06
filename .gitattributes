@@ -1,0 +1,7 @@
+* text=auto
+# Linux CI 要直接执行这些脚本，必须是 LF
+*.sh text eol=lf
+# Windows 本地脚本保持 CRLF
+*.ps1 text eol=crlf
+*.exe binary
+*.html text

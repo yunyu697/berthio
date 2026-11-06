@@ -1,0 +1,81 @@
+name: Release
+
+# 只在 Linux runner 上跑；tag 触发构建与发布。
+# tag 必须与 Cargo.toml 的版本号完全一致（例如 1.0.0-alpha1，不带 v 前缀）。
+
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出（完整 tag 历史）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 版本规则校验（tag 一致性 + alpha 序号单调 + 段位上限）
+        run: |
+          bash scripts/test-check-version.sh
+          bash scripts/check-version.sh --tag "$GITHUB_REF_NAME"
+
+      - name: 构建 Linux 二进制
+        run: cargo build --release --locked
+
+      - name: 校验二进制内版本
+        run: bash scripts/check-version.sh --tag "$GITHUB_REF_NAME" --binary ./target/release/berthio
+
+      - name: 交叉编译 Windows 二进制（失败不阻断发布）
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+          rustup target add x86_64-pc-windows-gnu
+          cargo build --release --locked --target x86_64-pc-windows-gnu
+
+      - name: 打包附件（二进制 + 对应里程碑 demo + SHA256SUMS）
+        run: |
+          set -eu
+          TAG="$GITHUB_REF_NAME"
+          SEQ="${TAG##*-alpha}"
+          if [ "$SEQ" = "$TAG" ]; then
+            echo "正式版不附带 alpha demo"; DEMO=""
+          else
+            DEMO="demo/m${SEQ}/index.html"
+            test -f "$DEMO" || { echo "缺少该里程碑 demo: $DEMO"; exit 1; }
+          fi
+
+          mkdir -p dist
+          cp target/release/berthio "dist/berthio-${TAG}-linux-x86_64"
+          if [ -f target/x86_64-pc-windows-gnu/release/berthio.exe ]; then
+            cp target/x86_64-pc-windows-gnu/release/berthio.exe "dist/berthio-${TAG}-windows-x86_64.exe"
+          else
+            echo "::warning::Windows 交叉编译未产出，附件只有 Linux 二进制"
+          fi
+          if [ -n "$DEMO" ]; then
+            cp "$DEMO" "dist/berthio-${TAG}-demo-m${SEQ}.html"
+          fi
+
+          cd dist
+          sha256sum * > SHA256SUMS
+          ls -l
+
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="$GITHUB_REF_NAME"
+          NOTES="release-notes/${TAG}.md"
+          test -f "$NOTES" || { echo "缺少发布说明: $NOTES"; exit 1; }
+          gh release create "$TAG" dist/* \
+            --title "Berthio $TAG" \
+            --notes-file "$NOTES"

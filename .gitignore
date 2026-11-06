@@ -1,0 +1,7 @@
+/target
+/.berthio
+/.tools
+*.exe
+*.pdb
+.DS_Store
+/tmp
