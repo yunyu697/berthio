@@ -17,6 +17,41 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:GuardRepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+
+function Get-GuardDefaultManifest {
+  $dir = Join-Path $script:GuardRepoRoot 'tmp\guard-audit'
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  return (Join-Path $dir ('delete-manifest-' + (Get-Date -Format 'yyyyMMdd') + '.jsonl'))
+}
+
+function Write-GuardManifest {
+  param(
+    [string]$Manifest,
+    [string]$Operation,
+    [string]$FullPath,
+    [string]$Kind,
+    [int]$Entries,
+    [bool]$Applied,
+    [string]$Destination = ''
+  )
+  $path = $Manifest
+  if ([string]::IsNullOrWhiteSpace($path)) { $path = Get-GuardDefaultManifest }
+  $dir = Split-Path -Parent $path
+  if (-not [string]::IsNullOrWhiteSpace($dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+  $record = [pscustomobject]@{
+    time        = (Get-Date).ToString('o')
+    operation   = $Operation
+    path        = $FullPath
+    kind        = $Kind
+    entries     = $Entries
+    applied     = $Applied
+    destination = $Destination
+  }
+  Add-Content -LiteralPath $path -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
+  Write-Host ("[guard]   确认清单: {0}" -f $path)
+  return $path
+}
 
 function Get-GuardUserHomes {
   $list = New-Object 'System.Collections.Generic.List[string]'
@@ -159,7 +194,8 @@ function Invoke-GuardedFileOperation {
     [AllowEmptyString()][string]$Destination = '',
     [string[]]$AllowedRoot = @(),
     [switch]$Apply,
-    [switch]$AllowMissing
+    [switch]$AllowMissing,
+    [string]$Manifest = ''
   )
 
   # 复制只写目标：源只需通过“绝对路径 + 非根/非主目录”校验（允许从只读夹具读取）；
@@ -190,6 +226,7 @@ function Invoke-GuardedFileOperation {
   Write-Host ("[guard]   源: {0}" -f $src.FullPath)
   Write-Host ("[guard]   条目: {0}（{1}）" -f $src.Entries, $src.Kind)
   if ($Operation -ne 'Remove') { Write-Host ("[guard]   目标: {0}" -f $dst.FullPath) }
+  $null = Write-GuardManifest -Manifest $Manifest -Operation $Operation -FullPath $src.FullPath -Kind $src.Kind -Entries $src.Entries -Applied ([bool]$Apply) -Destination $(if ($dst) { $dst.FullPath } else { '' })
 
   $result = [pscustomobject]@{
     Applied     = [bool]$Apply
@@ -228,9 +265,10 @@ function Remove-GuardedPath {
     [Parameter(Mandatory)][AllowEmptyString()][string]$Path,
     [string[]]$AllowedRoot = @(),
     [switch]$Apply,
-    [switch]$AllowMissing
+    [switch]$AllowMissing,
+    [string]$Manifest = ''
   )
-  return Invoke-GuardedFileOperation -Operation Remove -Path $Path -AllowedRoot $AllowedRoot -Apply:$Apply -AllowMissing:$AllowMissing
+  return Invoke-GuardedFileOperation -Operation Remove -Path $Path -AllowedRoot $AllowedRoot -Apply:$Apply -AllowMissing:$AllowMissing -Manifest $Manifest
 }
 
 function Copy-GuardedItem {
@@ -240,9 +278,10 @@ function Copy-GuardedItem {
     [Parameter(Mandatory)][AllowEmptyString()][string]$Destination,
     [string[]]$AllowedRoot = @(),
     [switch]$Apply,
-    [switch]$AllowMissing
+    [switch]$AllowMissing,
+    [string]$Manifest = ''
   )
-  return Invoke-GuardedFileOperation -Operation Copy -Path $Path -Destination $Destination -AllowedRoot $AllowedRoot -Apply:$Apply -AllowMissing:$AllowMissing
+  return Invoke-GuardedFileOperation -Operation Copy -Path $Path -Destination $Destination -AllowedRoot $AllowedRoot -Apply:$Apply -AllowMissing:$AllowMissing -Manifest $Manifest
 }
 
 function Move-GuardedItem {
@@ -252,7 +291,8 @@ function Move-GuardedItem {
     [Parameter(Mandatory)][AllowEmptyString()][string]$Destination,
     [string[]]$AllowedRoot = @(),
     [switch]$Apply,
-    [switch]$AllowMissing
+    [switch]$AllowMissing,
+    [string]$Manifest = ''
   )
-  return Invoke-GuardedFileOperation -Operation Move -Path $Path -Destination $Destination -AllowedRoot $AllowedRoot -Apply:$Apply -AllowMissing:$AllowMissing
+  return Invoke-GuardedFileOperation -Operation Move -Path $Path -Destination $Destination -AllowedRoot $AllowedRoot -Apply:$Apply -AllowMissing:$AllowMissing -Manifest $Manifest
 }

@@ -39,8 +39,10 @@ Expect-Reject 'C:\' '拒绝驱动根 C:\'
 Expect-Reject '' '拒绝空字符串'
 Expect-Reject $null '拒绝未定义（null）'
 Expect-Reject '..\..\Users' '拒绝 ..\..\Users 逃逸'
+Expect-Reject '..\..\Users\Tyler Zhang' '拒绝 ..\..\Users\Tyler Zhang 逃逸'
 Expect-Reject '$env:USERPROFILE' '拒绝未展开的 $env:USERPROFILE 字面量'
 Expect-Reject '%USERPROFILE%' '拒绝未展开的 %USERPROFILE%'
+Expect-Reject '%TEMP%' '拒绝未展开的 %TEMP%'
 if (-not [string]::IsNullOrWhiteSpace($userProfile)) {
   Expect-Reject (Join-Path $userProfile 'Downloads') '拒绝用户主目录之内的路径'
 }
@@ -54,11 +56,14 @@ Set-Content -LiteralPath (Join-Path $Target 'b.txt') -Value 'guard' -Encoding UT
 $v = Test-GuardPath -Path $Target -AllowedRoot $Allowed
 Check ($v.Ok -and $v.Kind -eq 'Directory' -and $v.Entries -ge 3) '允许根下的临时目录被放行' ("entries=" + $v.Entries)
 
-$dry = Remove-GuardedPath -Path $Target -AllowedRoot $Allowed
+$manifest = Join-Path $Allowed 'guard-audit-selftest.jsonl'
+$dry = Remove-GuardedPath -Path $Target -AllowedRoot $Allowed -Manifest $manifest
 Check ((-not $dry.Applied) -and (Test-Path -LiteralPath $Target)) '默认 dry-run 不删除' ("applied=" + $dry.Applied)
+Check (Test-Path -LiteralPath $manifest) '确认清单在删除前落盘'
 
-$apply = Remove-GuardedPath -Path $Target -AllowedRoot $Allowed -Apply
+$apply = Remove-GuardedPath -Path $Target -AllowedRoot $Allowed -Apply -Manifest $manifest
 Check ($apply.Applied -and -not (Test-Path -LiteralPath $Target)) '显式 -Apply 才删除'
+Check ((@(Get-Content -LiteralPath $manifest).Count) -ge 2) '确认清单记录了 dry-run 与 apply 两次操作'
 
 # ---------------------------------------------------------------- Copy / Move 也走同一护栏
 $CopyTarget = Join-Path $Allowed ('path-guard-copy-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
