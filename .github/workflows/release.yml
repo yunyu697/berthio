@@ -28,8 +28,19 @@ jobs:
           bash scripts/test-check-version.sh
           bash scripts/check-version.sh --tag "$GITHUB_REF_NAME"
 
-      - name: 构建 Linux 二进制
-        run: cargo build --release --locked
+      - name: 构建 Linux 二进制（Debian 12 基线，glibc 2.36）
+        run: |
+          set -eu
+          # 在 Debian 12 容器里构建：宿主 runner 是 Ubuntu 24.04（glibc 2.39），
+          # 直接构建出的二进制在 Debian 12 / Ubuntu 22.04 上会缺 GLIBC_2.39。
+          docker run --rm -v "$PWD:/src" -w /src debian:bookworm bash -c '
+            set -eu
+            apt-get update
+            apt-get install -y --no-install-recommends build-essential ca-certificates curl
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+            cargo build --release --locked
+          '
 
       - name: 校验二进制内版本
         run: bash scripts/check-version.sh --tag "$GITHUB_REF_NAME" --binary ./target/release/berthio
