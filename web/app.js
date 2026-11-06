@@ -260,7 +260,7 @@
     $('#page-title').textContent = PAGE_META[id][0];
     $('#page-sub').textContent = PAGE_META[id][1];
     window.scrollTo(0, 0);
-    if (id === 'export') schedulePreview();
+    if (id === 'export') { schedulePreview(); loadTokens(); }
   }
 
   function badgeClass(status) {
@@ -466,7 +466,9 @@
       '<div class="field"><label>监听地址</label><input class="input mono" id="e-listen" value="' + esc(inbound.listen || '0.0.0.0') + '"></div>' +
       '<div class="field"><label>端口</label><input class="input mono" id="e-port" type="number" min="1" max="65535" value="' + esc(inbound.port) + '"></div>' +
       '<div class="field"><label>启用</label><select class="input" id="e-enabled"><option value="1"' + (inbound.enabled ? ' selected' : '') + '>启用</option><option value="0"' + (inbound.enabled ? '' : ' selected') + '>停用</option></select></div>' +
-      '</div><div class="info-note" style="margin-top:12px">协议、安全层、客户端不在此修改。<br>保存会写入审计日志 <span class="mono">inbound.updated</span>（含改动前后值）。</div>';
+      '</div><div class="info-note" style="margin-top:12px">协议、安全层不在此修改。<br>保存会写入审计日志 <span class="mono">inbound.updated</span>（含改动前后值）。</div>' +
+      '<div style="margin-top:14px"><div style="font-size:12px;font-weight:600;margin-bottom:4px">客户端</div>' +
+      '<div id="e-client-box"><div class="table-note">加载中…</div></div></div>';
     openModal('修改入站', inbound.tag + ' · ' + inbound.id, html, '保存修改', function () {
       var patch = {};
       var remark = $('#e-remark').value.trim();
@@ -481,6 +483,152 @@
       api('/api/inbound/inbounds/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify(patch) })
         .then(function () { toast('入站已修改', id); loadAll(); })
         .catch(function (err) { toast('修改失败', err.message); });
+    });
+    loadEditClients(id);
+  }
+
+  /* ---------------- 客户端管理 ---------------- */
+  function loadEditClients(inboundId) {
+    var box = $('#e-client-box');
+    if (!box) return;
+    if (DEMO) { box.innerHTML = '<div class="table-note">演示模式只读</div>'; return; }
+    api('/api/inbound/inbounds/' + encodeURIComponent(inboundId) + '/clients').then(function (r) {
+      renderEditClients(inboundId, (r && r.items) || []);
+    }).catch(function (e) {
+      box.innerHTML = '<div class="table-note">' + esc(e.message) + '</div>';
+    });
+  }
+
+  function renderEditClients(inboundId, clients) {
+    var box = $('#e-client-box');
+    if (!box) return;
+    var head = clients.length ? '' : '<div class="table-note">该入站还没有客户端。</div>';
+    var rows = clients.map(function (c) {
+      var state = c.enabled ? '<span class="badge ok plain">启用</span>' : '<span class="badge muted plain">停用</span>';
+      return '<div class="token-row" data-client-id="' + esc(c.id) + '">' +
+        '<b style="font-size:11.5px">' + esc(c.email) + '</b>' + state +
+        '<span class="muted" style="font-size:11px">' + fmtBytes(c.used_bytes || 0) + ' / ' + (c.quota_bytes ? fmtBytes(c.quota_bytes) : '不限') + '</span>' +
+        '<span class="muted" style="font-size:11px">' + (c.expires_at ? esc(c.expires_at) : '不过期') + '</span>' +
+        '<div class="row-actions">' +
+        '<button class="btn btn-sm js-client-edit">编辑</button>' +
+        '<button class="btn btn-sm js-client-toggle">' + (c.enabled ? '停用' : '启用') + '</button>' +
+        '<button class="btn btn-sm js-client-reset">重置流量</button>' +
+        '<button class="btn btn-sm js-client-del">删除</button>' +
+        '</div></div>';
+    }).join('');
+    box.innerHTML = head + rows +
+      '<div class="form-grid" style="margin-top:10px">' +
+      '<div class="field"><label>新客户端 email</label><input class="input" id="e-new-email" placeholder="name@example"></div>' +
+      '<div class="field"><label>配额（字节，0=不限）</label><input class="input mono" id="e-new-quota" type="number" min="0" value="0"></div>' +
+      '<div class="field"><label>到期时间（可空）</label><input class="input mono" id="e-new-exp" placeholder="2027-01-01T00:00:00Z"></div>' +
+      '</div><button class="btn btn-sm" id="e-new-add" style="margin-top:8px">添加客户端</button>' +
+      '<div class="table-note">客户端修改/删除/停用/重置都会写入审计日志。</div>';
+    var addBtn = $('#e-new-add');
+    if (addBtn) addBtn.onclick = function () {
+      var email = $('#e-new-email').value.trim();
+      if (!email) { toast('email 必填'); return; }
+      var quota = parseInt($('#e-new-quota').value, 10);
+      var exp = $('#e-new-exp').value.trim();
+      var body = { email: email, quota_bytes: isNaN(quota) ? 0 : Math.max(0, quota) };
+      if (exp) body.expires_at = exp;
+      api('/api/inbound/inbounds/' + encodeURIComponent(inboundId) + '/clients', { method: 'POST', body: JSON.stringify(body) })
+        .then(function () { toast('客户端已添加', email); openInboundEdit(inboundId); })
+        .catch(function (err) { toast('添加失败', err.message); });
+    };
+    $$('.js-client-edit', box).forEach(function (b) {
+      b.onclick = function () {
+        var id = b.closest('[data-client-id]').getAttribute('data-client-id');
+        var c = clients.filter(function (x) { return x.id === id; })[0];
+        if (c) openClientEdit(inboundId, c);
+      };
+    });
+    $$('.js-client-toggle', box).forEach(function (b) {
+      b.onclick = function () {
+        var id = b.closest('[data-client-id]').getAttribute('data-client-id');
+        var c = clients.filter(function (x) { return x.id === id; })[0];
+        if (!c) return;
+        if (c.enabled) toggleClientOff(inboundId, c); else toggleClientOn(inboundId, c);
+      };
+    });
+    $$('.js-client-reset', box).forEach(function (b) {
+      b.onclick = function () {
+        var id = b.closest('[data-client-id]').getAttribute('data-client-id');
+        var c = clients.filter(function (x) { return x.id === id; })[0];
+        if (c) resetClientTraffic(inboundId, c);
+      };
+    });
+    $$('.js-client-del', box).forEach(function (b) {
+      b.onclick = function () {
+        var id = b.closest('[data-client-id]').getAttribute('data-client-id');
+        var c = clients.filter(function (x) { return x.id === id; })[0];
+        if (c) deleteClientRow(inboundId, c);
+      };
+    });
+  }
+
+  function clientPatch(inboundId, clientId, patch, okText) {
+    api('/api/inbound/inbounds/' + encodeURIComponent(inboundId) + '/clients/' + encodeURIComponent(clientId),
+      { method: 'PATCH', body: JSON.stringify(patch) })
+      .then(function () { toast(okText, clientId); openInboundEdit(inboundId); })
+      .catch(function (err) { toast('修改失败', err.message); });
+  }
+
+  function openClientEdit(inboundId, c) {
+    if (DEMO) { toast('演示模式只读'); return; }
+    var html = '<div class="form-grid">' +
+      '<div class="field"><label>email</label><input class="input" id="ce-email" maxlength="64" value="' + esc(c.email) + '"></div>' +
+      '<div class="field"><label>配额（字节，0=不限）</label><input class="input mono" id="ce-quota" type="number" min="0" value="' + esc(c.quota_bytes || 0) + '"></div>' +
+      '<div class="field"><label>到期时间（清空=不过期）</label><input class="input mono" id="ce-exp" value="' + esc(c.expires_at || '') + '"></div>' +
+      '<div class="field"><label>flow</label><input class="input mono" id="ce-flow" value="' + esc(c.flow || '') + '"></div>' +
+      '</div><div class="info-note" style="margin-top:12px">只提交有变化的字段；会写入审计日志 <span class="mono">inbound.client.updated</span>。</div>';
+    openModal('修改客户端', c.email, html, '保存修改', function () {
+      var patch = {};
+      var email = $('#ce-email').value.trim();
+      var quota = parseInt($('#ce-quota').value, 10);
+      var exp = $('#ce-exp').value.trim();
+      var flow = $('#ce-flow').value.trim();
+      if (email !== c.email) patch.email = email;
+      if (!isNaN(quota) && quota !== (c.quota_bytes || 0)) patch.quota_bytes = Math.max(0, quota);
+      if (exp !== (c.expires_at || '')) patch.expires_at = exp;
+      if (flow !== (c.flow || '')) patch.flow = flow;
+      if (!Object.keys(patch).length) { toast('没有改动'); return; }
+      clientPatch(inboundId, c.id, patch, '客户端已修改');
+    });
+  }
+
+  function toggleClientOff(inboundId, c) {
+    var body = '<div class="info-note">将停用客户端 <b>' + esc(c.email) + '</b>。<br>' +
+      '停用后该客户端的导出与订阅立即不可用；状态保留，可随时重新启用。<br>' +
+      '会写入审计日志 <span class="mono">inbound.client.disabled</span>。</div>';
+    openModal('停用客户端？', '可随时重新启用', body, '确认停用', function () {
+      clientPatch(inboundId, c.id, { enabled: false }, '客户端已停用');
+    });
+  }
+
+  function toggleClientOn(inboundId, c) {
+    clientPatch(inboundId, c.id, { enabled: true }, '客户端已启用');
+  }
+
+  function resetClientTraffic(inboundId, c) {
+    var body = '<div class="info-note">将把客户端 <b>' + esc(c.email) + '</b> 的已用流量从 ' +
+      fmtBytes(c.used_bytes || 0) + ' 归零。<br>不影响配额、到期与启用状态；会写入审计日志 <span class="mono">inbound.client.reset_traffic</span>。</div>';
+    openModal('重置流量？', '只清已用量，不改配额', body, '确认重置', function () {
+      api('/api/inbound/inbounds/' + encodeURIComponent(inboundId) + '/clients/' + encodeURIComponent(c.id) + '/reset',
+        { method: 'POST', body: '{}' })
+        .then(function () { toast('流量已重置', c.email); openInboundEdit(inboundId); })
+        .catch(function (err) { toast('重置失败', err.message); });
+    });
+  }
+
+  function deleteClientRow(inboundId, c) {
+    var body = '<div class="info-note">将删除客户端 <b>' + esc(c.email) + '</b>（UUID 与配额一并移除）。<br>' +
+      '只删除状态记录并重写 <span class="mono">state.json</span>，<b>不删除任何文件</b>，不会作用到数据目录之外。<br>' +
+      '会写入审计日志 <span class="mono">inbound.client.deleted</span>（含被删客户端的标识与参数摘要）。</div>';
+    openModal('删除客户端？', '此操作不可撤销', body, '确认删除', function () {
+      api('/api/inbound/inbounds/' + encodeURIComponent(inboundId) + '/clients/' + encodeURIComponent(c.id) +
+        '?confirm=' + encodeURIComponent(c.id), { method: 'DELETE', body: '{}' })
+        .then(function () { toast('客户端已删除', c.email); openInboundEdit(inboundId); })
+        .catch(function (err) { toast('删除失败', err.message); });
     });
   }
 
@@ -1206,13 +1354,37 @@
       .then(function (r) {
         var base = (UI.panel && UI.panel.panel_address) ? ('http://' + UI.panel.panel_address) : location.origin;
         $('#export-sub-url').textContent = (DEMO ? '' : base) + r.url;
-        var target = UI.export.format === 'singbox' ? 'sing-box' : 'mihomo';
-        var row = '<div class="token-row" data-token-id="' + esc(r.id) + '"><span class="mono mask">' + esc(r.token) + '</span>' +
-          '<span class="badge ' + (target === 'sing-box' ? 'purple' : 'info') + ' plain">' + target + '</span>' +
-          '<div class="row-actions"><button class="btn btn-sm js-rotate-token">轮换</button><button class="btn btn-sm js-revoke-token">吊销</button></div></div>';
-        $('#export-tokens').innerHTML = row + '<div class="table-note">' + esc(r.note || '只展示一次；服务端仅存 SHA-256') + '</div>';
-        toast('订阅令牌已生成', r.url);
+        loadTokens();
+        toast('订阅令牌已生成', '明文链接只显示一次；刷新后只能看到元信息');
       }).catch(function (e) { toast('签发失败', e.message); });
+  }
+
+  function loadTokens() {
+    if (DEMO) return;
+    var box = $('#export-tokens');
+    if (!box) return;
+    api('/api/export/tokens').then(function (r) { renderTokens(r); }).catch(function () { });
+  }
+
+  function renderTokens(r) {
+    var box = $('#export-tokens');
+    if (!box) return;
+    var items = (r && r.tokens) || [];
+    if (!items.length) {
+      box.innerHTML = '<div class="table-note">还没有订阅令牌；签发后明文链接只显示一次，刷新后不可再取。</div>';
+      return;
+    }
+    box.innerHTML = items.map(function (t) {
+      var active = t.status !== 'revoked';
+      return '<div class="token-row" data-token-id="' + esc(t.id) + '">' +
+        '<span class="mono mask">' + esc(t.id) + '</span>' +
+        '<span class="badge ' + (t.target === 'sing-box' ? 'purple' : 'info') + ' plain">' + esc(t.target) + '</span>' +
+        '<span class="muted" style="font-size:11px">' + esc(t.email || t.client_id) + '</span>' +
+        '<span class="muted" style="font-size:11px">' + esc(t.created_at) + '</span>' +
+        (active ? '' : '<span class="badge bad plain">已吊销</span>') +
+        (active ? '<div class="row-actions"><button class="btn btn-sm js-rotate-token">轮换</button><button class="btn btn-sm js-revoke-token">吊销</button></div>' : '') +
+        '</div>';
+    }).join('') + '<div class="table-note">' + esc((r && r.note) || '服务端只存 SHA-256，列表不回显明文') + '</div>';
   }
 
   // 设计稿里的“轮换/吊销”按钮：只操作带 data-token-id 的真实令牌行（静态演示行保持占位）。
@@ -1231,7 +1403,7 @@
         if (!window.confirm('吊销后该订阅立即失效，且不可撤销。确定吊销？')) return;
         api('/api/export/tokens/' + encodeURIComponent(id) + '/revoke', { method: 'POST' })
           .then(function () {
-            row.querySelector('.row-actions').innerHTML = '<span class="badge bad plain">已吊销</span>';
+            loadTokens();
             toast('令牌已吊销', '该订阅链接立即失效');
           }).catch(function (err) { toast('吊销失败', err.message); });
       }

@@ -728,3 +728,329 @@ pub fn delete_inbound(
         }
     }
 }
+
+#[derive(Debug, Default, Deserialize)]
+pub struct UpdateClientReq {
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub quota_bytes: Option<u64>,
+    /// 空字符串表示清空到期时间。
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub flow: Option<String>,
+}
+
+/// 修改客户端：只允许改能止损的字段（email / 配额 / 到期 / 启用 / flow）。
+pub fn update_client(
+    store: &Store,
+    inbound_id: &str,
+    client_id: &str,
+    req: UpdateClientReq,
+    actor: &str,
+    ip: &str,
+) -> ApiResult<serde_json::Value> {
+    let state = store.snapshot();
+    let inbound = state
+        .inbounds
+        .iter()
+        .find(|i| i.id == inbound_id)
+        .ok_or_else(|| ApiError::not_found(format!("入站 {inbound_id} 不存在")))?;
+    let client = inbound
+        .clients
+        .iter()
+        .find(|c| c.id == client_id)
+        .ok_or_else(|| ApiError::not_found(format!("客户端 {client_id} 不存在")))?;
+
+    let email = match req.email.as_deref() {
+        Some(raw) => {
+            let v = raw.trim();
+            if v.is_empty() {
+                return Err(ApiError::bad_request("客户端 email 不能为空").with_field("email", "非空"));
+            }
+            if v.chars().count() > 64 {
+                return Err(ApiError::bad_request("客户端 email 不能超过 64 字符").with_field("email", "≤64"));
+            }
+            if inbound.clients.iter().any(|c| c.id != client_id && c.email == v) {
+                return Err(ApiError::conflict("同一入站内 email 必须唯一").with_field("email", "已存在"));
+            }
+            Some(v.to_string())
+        }
+        None => None,
+    };
+    let flow = req.flow.as_deref().map(|s| s.trim().to_string());
+    if let Some(f) = &flow {
+        if f.chars().count() > 64 {
+            return Err(ApiError::bad_request("flow 不能超过 64 字符").with_field("flow", "≤64"));
+        }
+    }
+    let expires = req.expires_at.as_deref().map(|s| {
+        let v = s.trim();
+        if v.is_empty() {
+            None
+        } else {
+            Some(v.to_string())
+        }
+    });
+    if let Some(Some(v)) = &expires {
+        if v.chars().count() > 40 {
+            return Err(ApiError::bad_request("到期时间格式过长").with_field("expires_at", "ISO 时间或空"));
+        }
+    }
+
+    let mut changes = serde_json::Map::new();
+    if let Some(v) = &email {
+        if v != &client.email {
+            changes.insert("email".into(), serde_json::json!({"from": client.email.clone(), "to": v}));
+        }
+    }
+    if let Some(v) = req.quota_bytes {
+        if v != client.quota_bytes {
+            changes.insert("quota_bytes".into(), serde_json::json!({"from": client.quota_bytes, "to": v}));
+        }
+    }
+    if let Some(v) = &expires {
+        if v != &client.expires_at {
+            changes.insert("expires_at".into(), serde_json::json!({"from": client.expires_at.clone(), "to": v}));
+        }
+    }
+    if let Some(v) = req.enabled {
+        if v != client.enabled {
+            changes.insert("enabled".into(), serde_json::json!({"from": client.enabled, "to": v}));
+        }
+    }
+    if let Some(v) = &flow {
+        if v != &client.flow {
+            changes.insert("flow".into(), serde_json::json!({"from": client.flow.clone(), "to": v}));
+        }
+    }
+    if changes.is_empty() {
+        return Err(ApiError::bad_request("没有需要修改的字段"));
+    }
+
+    let before_email = client.email.clone();
+    let before_enabled = client.enabled;
+    let audit_email = email.clone().unwrap_or(before_email);
+    let action = if req.enabled == Some(false) && before_enabled {
+        "inbound.client.disabled"
+    } else {
+        "inbound.client.updated"
+    };
+    let changes_json = serde_json::Value::Object(changes.clone());
+
+    let applied = store.update(|st| {
+        let inb = st
+            .inbounds
+            .iter_mut()
+            .find(|i| i.id == inbound_id)
+            .ok_or_else(|| ApiError::not_found(format!("入站 {inbound_id} 不存在")))?;
+        let idx = inb
+            .clients
+            .iter()
+            .position(|c| c.id == client_id)
+            .ok_or_else(|| ApiError::not_found(format!("客户端 {client_id} 不存在")))?;
+        if let Some(v) = &email {
+            if inb.clients.iter().any(|c| c.id != client_id && c.email == *v) {
+                return Err(ApiError::conflict("同一入站内 email 必须唯一").with_field("email", "已存在"));
+            }
+        }
+        let c = &mut inb.clients[idx];
+        if let Some(v) = email.clone() {
+            c.email = v;
+        }
+        if let Some(v) = req.quota_bytes {
+            c.quota_bytes = v;
+        }
+        if let Some(v) = expires.clone() {
+            c.expires_at = v;
+        }
+        if let Some(v) = req.enabled {
+            c.enabled = v;
+            if v {
+                c.disabled_reason.clear();
+            } else {
+                c.disabled_reason = "manual".into();
+            }
+        }
+        if let Some(v) = flow.clone() {
+            c.flow = v;
+        }
+        c.updated_at = util::now_iso();
+        inb.updated_at = util::now_iso();
+        Ok(())
+    });
+
+    match applied {
+        Ok(()) => {
+            store.audit_op(
+                action,
+                actor,
+                ip,
+                &format!("{inbound_id}/{client_id}"),
+                "ok",
+                serde_json::json!({
+                    "inbound_id": inbound_id,
+                    "client_id": client_id,
+                    "email": audit_email,
+                    "changes": changes_json,
+                }),
+            );
+            Ok(serde_json::json!({
+                "updated": true,
+                "id": client_id,
+                "changes": changes_json,
+            }))
+        }
+        Err(e) => {
+            store.audit_op(
+                action,
+                actor,
+                ip,
+                &format!("{inbound_id}/{client_id}"),
+                "denied",
+                serde_json::json!({"code": e.code, "message": e.message}),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// 删除客户端：只从状态里移除记录并原子重写 `state/state.json`，不删除任何文件。
+/// 二次确认：必须带上 `confirm=<客户端 id>`。
+pub fn delete_client(
+    store: &Store,
+    inbound_id: &str,
+    client_id: &str,
+    confirm: &str,
+    actor: &str,
+    ip: &str,
+) -> ApiResult<serde_json::Value> {
+    let target = format!("{inbound_id}/{client_id}");
+    if confirm != client_id {
+        store.audit_op(
+            "inbound.client.deleted",
+            actor,
+            ip,
+            &target,
+            "denied",
+            serde_json::json!({"reason": "confirm_mismatch", "inbound_id": inbound_id, "client_id": client_id}),
+        );
+        return Err(ApiError::bad_request("删除客户端需要二次确认：confirm 必须等于客户端 id")
+            .with_field("confirm", "界面会带上该参数"));
+    }
+    let removed = store.update(|st| {
+        let inb = st
+            .inbounds
+            .iter_mut()
+            .find(|i| i.id == inbound_id)
+            .ok_or_else(|| ApiError::not_found(format!("入站 {inbound_id} 不存在")))?;
+        let idx = inb
+            .clients
+            .iter()
+            .position(|c| c.id == client_id)
+            .ok_or_else(|| ApiError::not_found(format!("客户端 {client_id} 不存在")))?;
+        let c = inb.clients.remove(idx);
+        inb.updated_at = util::now_iso();
+        Ok((c, inb.clients.len()))
+    });
+    match removed {
+        Ok((c, remaining)) => {
+            let summary = serde_json::json!({
+                "inbound_id": inbound_id,
+                "client_id": c.id,
+                "email": c.email,
+                "flow": c.flow,
+                "quota_bytes": c.quota_bytes,
+                "used_bytes": c.used_bytes,
+                "expires_at": c.expires_at,
+                "enabled": c.enabled,
+                "created_at": c.created_at,
+                "files_deleted": 0,
+            });
+            store.audit_op(
+                "inbound.client.deleted",
+                actor,
+                ip,
+                &target,
+                "ok",
+                serde_json::json!({"summary": summary, "remaining_clients": remaining}),
+            );
+            Ok(serde_json::json!({
+                "deleted": true,
+                "id": client_id,
+                "summary": summary,
+                "remaining_clients": remaining,
+            }))
+        }
+        Err(e) => {
+            store.audit_op(
+                "inbound.client.deleted",
+                actor,
+                ip,
+                &target,
+                "denied",
+                serde_json::json!({"code": e.code, "message": e.message}),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// 重置客户端已用流量：只把 `used_bytes` 归零，不删除任何文件。
+pub fn reset_client_traffic(
+    store: &Store,
+    inbound_id: &str,
+    client_id: &str,
+    actor: &str,
+    ip: &str,
+) -> ApiResult<serde_json::Value> {
+    let mut previous = 0u64;
+    let applied = store.update(|st| {
+        let inb = st
+            .inbounds
+            .iter_mut()
+            .find(|i| i.id == inbound_id)
+            .ok_or_else(|| ApiError::not_found(format!("入站 {inbound_id} 不存在")))?;
+        let c = inb
+            .clients
+            .iter_mut()
+            .find(|c| c.id == client_id)
+            .ok_or_else(|| ApiError::not_found(format!("客户端 {client_id} 不存在")))?;
+        previous = c.used_bytes;
+        c.used_bytes = 0;
+        c.updated_at = util::now_iso();
+        inb.updated_at = util::now_iso();
+        Ok(())
+    });
+    match applied {
+        Ok(()) => {
+            store.audit_op(
+                "inbound.client.reset_traffic",
+                actor,
+                ip,
+                &format!("{inbound_id}/{client_id}"),
+                "ok",
+                serde_json::json!({
+                    "inbound_id": inbound_id,
+                    "client_id": client_id,
+                    "previous_used_bytes": previous,
+                }),
+            );
+            Ok(serde_json::json!({"reset": true, "id": client_id, "previous_used_bytes": previous}))
+        }
+        Err(e) => {
+            store.audit_op(
+                "inbound.client.reset_traffic",
+                actor,
+                ip,
+                &format!("{inbound_id}/{client_id}"),
+                "denied",
+                serde_json::json!({"code": e.code, "message": e.message}),
+            );
+            Err(e)
+        }
+    }
+}

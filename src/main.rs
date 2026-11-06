@@ -1,4 +1,6 @@
 mod auth;
+#[cfg(test)]
+mod capability;
 mod demo;
 mod error;
 mod export;

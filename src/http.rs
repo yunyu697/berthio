@@ -659,6 +659,7 @@ fn route(
         ("GET", "/api/inbound/wizard/defaults") => Ok(Response::json(200, &wizard::defaults(store))),
         ("GET", "/api/export/preview") => export_preview(req, store, &actor, &net.client_ip),
         ("GET", "/api/export/file") => export_file(req, store, &actor, &net.client_ip),
+        ("GET", "/api/export/tokens") => Ok(Response::json(200, &token_list(store))),
         ("POST", "/api/export/tokens") => create_token(req, store),
         ("POST", "/api/migrate/preview") => migrate_preview(req, store, &actor, &net.client_ip),
         ("POST", "/api/migrate/apply") => migrate_apply(req, store, &actor, &net.client_ip),
@@ -666,6 +667,33 @@ fn route(
         ("GET", "/api/audit") => Ok(Response::json(200, &audit_payload(store, req))),
         ("GET", "/api/audit.csv") => audit_csv(store, req),
         ("GET", p) if p.starts_with("/sub/") => subscription(req, &p[5..], store),
+        ("POST", p) if p.starts_with("/api/inbound/inbounds/") && p.contains("/clients/") && p.ends_with("/reset") => {
+            let rest = &p["/api/inbound/inbounds/".len()..p.len() - "/reset".len()];
+            match split_client_path(rest) {
+                Some((iid, cid)) if !cid.contains('/') => {
+                    reset_client_traffic(store, iid, cid, &actor, &net.client_ip)
+                }
+                _ => Err(ApiError::not_found(format!("未知客户端接口 {p}"))),
+            }
+        }
+        ("PATCH", p) if p.starts_with("/api/inbound/inbounds/") && p.contains("/clients/") => {
+            let rest = &p["/api/inbound/inbounds/".len()..];
+            match split_client_path(rest) {
+                Some((iid, cid)) if !cid.contains('/') => {
+                    update_client(req, store, iid, cid, &actor, &net.client_ip)
+                }
+                _ => Err(ApiError::not_found(format!("未知客户端接口 {p}"))),
+            }
+        }
+        ("DELETE", p) if p.starts_with("/api/inbound/inbounds/") && p.contains("/clients/") => {
+            let rest = &p["/api/inbound/inbounds/".len()..];
+            match split_client_path(rest) {
+                Some((iid, cid)) if !cid.contains('/') => {
+                    delete_client(req, store, iid, cid, &actor, &net.client_ip)
+                }
+                _ => Err(ApiError::not_found(format!("未知客户端接口 {p}"))),
+            }
+        }
         ("PATCH", p) if p.starts_with("/api/inbound/inbounds/") => {
             let id = &p["/api/inbound/inbounds/".len()..];
             if id.contains('/') {
@@ -1367,6 +1395,54 @@ fn create_client(req: &Request, store: &Store, id: &str, actor: &str, ip: &str) 
     Ok(Response::json(201, &out))
 }
 
+fn split_client_path(rest: &str) -> Option<(&str, &str)> {
+    let (iid, cid) = rest.split_once("/clients/")?;
+    if iid.is_empty() || cid.is_empty() {
+        None
+    } else {
+        Some((iid, cid))
+    }
+}
+
+fn update_client(
+    req: &Request,
+    store: &Store,
+    inbound_id: &str,
+    client_id: &str,
+    actor: &str,
+    ip: &str,
+) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let payload: wizard::UpdateClientReq = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad_request(format!("字段解析失败: {e}")))?;
+    let out = wizard::update_client(store, inbound_id, client_id, payload, actor, ip)?;
+    Ok(Response::json(200, &out))
+}
+
+fn delete_client(
+    req: &Request,
+    store: &Store,
+    inbound_id: &str,
+    client_id: &str,
+    actor: &str,
+    ip: &str,
+) -> ApiResult<Response> {
+    let confirm = req.query.get("confirm").map(|s| s.as_str()).unwrap_or("");
+    let out = wizard::delete_client(store, inbound_id, client_id, confirm, actor, ip)?;
+    Ok(Response::json(200, &out))
+}
+
+fn reset_client_traffic(
+    store: &Store,
+    inbound_id: &str,
+    client_id: &str,
+    actor: &str,
+    ip: &str,
+) -> ApiResult<Response> {
+    let out = wizard::reset_client_traffic(store, inbound_id, client_id, actor, ip)?;
+    Ok(Response::json(200, &out))
+}
+
 fn export_preview(req: &Request, store: &Store, actor: &str, ip: &str) -> ApiResult<Response> {
     let sel = selection_from(req);
     let payload = export::render_payload(store, sel)?;
@@ -1493,6 +1569,41 @@ fn target_from_ua(ua: &str) -> Option<&'static str> {
         return Some("mihomo");
     }
     None
+}
+
+fn token_list(store: &Store) -> serde_json::Value {
+    let state = store.snapshot();
+    let items: Vec<serde_json::Value> = state
+        .tokens
+        .iter()
+        .map(|t| {
+            let mut inbound_id = String::new();
+            let mut email = String::new();
+            for i in &state.inbounds {
+                if let Some(c) = i.clients.iter().find(|c| c.id == t.client_id) {
+                    inbound_id = i.id.clone();
+                    email = c.email.clone();
+                    break;
+                }
+            }
+            json!({
+                "id": t.id,
+                "inbound_id": inbound_id,
+                "client_id": t.client_id,
+                "email": email,
+                "target": t.target,
+                "status": if t.revoked_at.is_some() { "revoked" } else { "active" },
+                "created_at": t.created_at,
+                "revoked_at": t.revoked_at,
+                "last_access": t.last_access,
+            })
+        })
+        .collect();
+    json!({
+        "tokens": items,
+        "count": items.len(),
+        "note": "服务端只存 token 的 SHA-256；列表不返回明文，只能看到元信息",
+    })
 }
 
 fn create_token(req: &Request, store: &Store) -> ApiResult<Response> {

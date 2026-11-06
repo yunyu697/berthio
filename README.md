@@ -13,7 +13,8 @@ Berthio 是一个自建的代理服务端**控制面面板**：单进程、单�
 
 ### 入站管理
 
-- 从模板创建 xray 或 sing-box 入站，可查看入站详情与客户端列表、新增客户端。
+- 从模板创建 xray 或 sing-box 入站，可查看入站详情与客户端列表；入站可编辑（备注/监听/端口/启用）与删除（`?confirm=<id>` 二次确认，不触碰文件系统）。
+- 客户端支持新增、修改（email/配额/到期/flow）、启用/停用、重置流量与删除（删除需 `?confirm=<id>`，不触碰文件系统）；以上动作均写审计。
 - xray 入站支持 VLESS + REALITY / TLS，传输支持 tcp、ws、xhttp。
 - sing-box 入站支持 VLESS、hysteria2、tuic 的配置生成（hysteria2 未经过真实样本验证，见「已知限制」）。
 - 创建与导出前执行三级校验：L0 结构、L1 语义、L2 用真实内核二进制自检（`xray -test` / `sing-box check` / `mihomo -t`）；运行期逐请求执行，L2 失败直接拒绝下发（HTTP 422）。
