@@ -7,6 +7,7 @@ use crate::rulesets;
 use crate::sources;
 use crate::state::{self, Config, PanelConfig, RemoteAccess, Store};
 use crate::supervisor::{self, Supervisor};
+use crate::update::Manager;
 use crate::util;
 use crate::wizard;
 use serde_json::json;
@@ -342,13 +343,32 @@ fn selection_from(req: &Request) -> Selection {
     }
 }
 
+/// 自更新替换后由新进程重启时，旧进程可能还占着端口：短暂重试，避免重启失败。
+fn bind_listener(listen: &str) -> std::io::Result<TcpListener> {
+    let restart = std::env::var("BERTHIO_UPDATE_RESTART").ok().as_deref() == Some("1");
+    let mut last_err = None;
+    let attempts = if restart { 60 } else { 1 };
+    for _ in 0..attempts {
+        match TcpListener::bind(listen) {
+            Ok(l) => return Ok(l),
+            Err(e) => {
+                last_err = Some(e);
+                if restart {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap())
+}
+
 pub fn serve(listen: &str, store: Arc<Store>, auth: Arc<Auth>, sup: Arc<Supervisor>, demo: bool) {
     let cfg = store.config();
     let (effective, warning) = cfg.effective_listen();
     if warning.is_some() && effective != listen {
         eprintln!("[berthio] 监听地址被安全策略覆盖：{listen} -> {effective}");
     }
-    let listener = match TcpListener::bind(listen) {
+    let listener = match bind_listener(listen) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("[berthio] 监听 {listen} 失败: {e}");
@@ -363,12 +383,14 @@ pub fn serve(listen: &str, store: Arc<Store>, auth: Arc<Auth>, sup: Arc<Supervis
         store.home.display(),
         if demo { "demo" } else { "session+csrf" }
     );
+    let upd = Arc::new(Manager::new(&store.home, VERSION, demo));
     for stream in listener.incoming() {
         match stream {
             Ok(mut s) => {
                 let store = Arc::clone(&store);
                 let auth = Arc::clone(&auth);
                 let sup = Arc::clone(&sup);
+                let upd = Arc::clone(&upd);
                 std::thread::spawn(move || {
                     let _ = s.set_read_timeout(Some(Duration::from_secs(15)));
                     let peer_ip = s
@@ -376,7 +398,7 @@ pub fn serve(listen: &str, store: Arc<Store>, auth: Arc<Auth>, sup: Arc<Supervis
                         .map(|a| a.ip().to_string())
                         .unwrap_or_else(|_| "unknown".into());
                     let resp = match read_request(&mut s, &peer_ip) {
-                        Ok(req) => route(&req, &store, &auth, &sup, demo),
+                        Ok(req) => route(&req, &store, &auth, &sup, &upd, demo),
                         Err(e) => Response::json(400, &json!({"error":{"code":"bad_request","message":e}})),
                     };
                     let _ = write_response(&mut s, resp);
@@ -419,7 +441,7 @@ fn write_response(stream: &mut TcpStream, resp: Response) -> std::io::Result<()>
     stream.flush()
 }
 
-fn route(req: &Request, store: &Store, auth: &Auth, sup: &Supervisor, demo: bool) -> Response {
+fn route(req: &Request, store: &Store, auth: &Auth, sup: &Supervisor, upd: &Arc<Manager>, demo: bool) -> Response {
     let cfg = store.config();
     let net = net_info(req, &cfg);
     let token = req.cookie(SESSION_COOKIE);
@@ -461,6 +483,10 @@ fn route(req: &Request, store: &Store, auth: &Auth, sup: &Supervisor, demo: bool
         ("POST", "/api/auth/password") => auth_password(req, store, auth, &net),
         ("GET", "/api/panel") => Ok(Response::json(200, &panel_payload(store, auth, demo, &cfg))),
         ("PATCH", "/api/panel") => patch_panel(req, store, &actor, &net),
+        ("GET", "/api/update/status") => Ok(Response::json(200, &upd.status(&cfg.update))),
+        ("POST", "/api/update/check") => update_check(upd, store, demo, &actor),
+        ("POST", "/api/update/download") => update_download(req, upd, store, demo, &actor),
+        ("POST", "/api/update/install") => update_install(req, upd, store, demo, &actor),
         ("GET", "/api/kernels") => Ok(Response::json(200, &kernel_payload(store, sup))),
         ("POST", p) if p.starts_with("/api/kernels/") => kernel_action(store, sup, p),
         ("GET", p) if p.starts_with("/api/kernels/") && p.ends_with("/log") => {
@@ -730,6 +756,17 @@ fn patch_panel(req: &Request, store: &Store, actor: &str, net: &NetInfo) -> ApiR
         panel.remote_access.trusted_proxies = list;
         changed = true;
     }
+    if let Some(mirror) = body.get("update_mirror").and_then(|v| v.as_str()) {
+        let mirror = mirror.trim();
+        if mirror != "auto" && !panel.update.mirrors.iter().any(|m| m.id == mirror) {
+            return Err(ApiError::bad_request("更新镜像不存在")
+                .with_field("update_mirror", format!("可选：auto / {}", panel.update.mirrors.iter().map(|m| m.id.as_str()).collect::<Vec<_>>().join(" / "))));
+        }
+        if mirror != panel.update.mirror {
+            panel.update.mirror = mirror.to_string();
+            changed = true;
+        }
+    }
     if !panel.remote_access.enabled && !state::listen_is_loopback(&panel.listen) {
         let mut err = ApiError::bad_request("监听非回环地址必须先确认开启远程访问")
             .with_field("listen", panel.listen.clone())
@@ -764,6 +801,11 @@ fn patch_panel(req: &Request, store: &Store, actor: &str, net: &NetInfo) -> ApiR
             "listen": panel.listen,
             "listen_effective": effective,
             "restart_required": listen_changed || changed,
+            "update": {
+                "feed": panel.update.feed,
+                "mirror": panel.update.mirror,
+                "mirrors": panel.update.mirrors.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
+            },
             "remote_access": {
                 "enabled": panel.remote_access.enabled,
                 "acknowledged_at": panel.remote_access.acknowledged_at,
@@ -773,6 +815,51 @@ fn patch_panel(req: &Request, store: &Store, actor: &str, net: &NetInfo) -> ApiR
             "note": "监听/远程开关变更需重启面板进程后生效；当前连接不受影响",
         }),
     ))
+}
+
+fn update_check(upd: &Arc<Manager>, store: &Store, demo: bool, actor: &str) -> ApiResult<Response> {
+    if demo {
+        return Err(ApiError::bad_request("演示模式不检查更新"));
+    }
+    let cfg = store.config().update;
+    upd.start_check(cfg.clone())
+        .map_err(|e| ApiError::conflict(e).with_field("action", "等待当前更新任务结束后重试"))?;
+    store.audit(
+        "update.check",
+        actor,
+        json!({"feed": cfg.feed, "mirror": cfg.mirror}),
+    );
+    Ok(Response::json(202, &json!({"started": true})))
+}
+
+fn update_download(req: &Request, upd: &Arc<Manager>, store: &Store, demo: bool, actor: &str) -> ApiResult<Response> {
+    if demo {
+        return Err(ApiError::bad_request("演示模式不执行下载"));
+    }
+    let body = body_json(req)?;
+    let save = body.get("save").and_then(|v| v.as_bool()).unwrap_or(false);
+    let cfg = store.config().update;
+    upd.start_download(cfg, save)
+        .map_err(|e| ApiError::conflict(e).with_field("action", "等待当前更新任务结束后重试"))?;
+    store.audit("update.download", actor, json!({"save": save}));
+    Ok(Response::json(202, &json!({"started": true, "save": save})))
+}
+
+fn update_install(req: &Request, upd: &Arc<Manager>, store: &Store, demo: bool, actor: &str) -> ApiResult<Response> {
+    if demo {
+        return Err(ApiError::bad_request("演示模式不执行安装"));
+    }
+    let body = body_json(req)?;
+    let path = body.get("path").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if path.is_empty() {
+        return Err(ApiError::bad_request("缺少已下载安装包路径")
+            .with_field("path", "先「仅下载」，再用状态里的 saved.path 安装"));
+    }
+    let cfg = store.config().update;
+    upd.start_install_saved(cfg, path.clone())
+        .map_err(|e| ApiError::conflict(e).with_field("action", "等待当前更新任务结束后重试"))?;
+    store.audit("update.install", actor, json!({"path": path}));
+    Ok(Response::json(202, &json!({"installing": true})))
 }
 
 fn kernel_payload(store: &Store, sup: &Supervisor) -> serde_json::Value {

@@ -10,6 +10,7 @@ mod rulesets;
 mod sources;
 mod state;
 mod supervisor;
+mod update;
 mod util;
 mod wizard;
 

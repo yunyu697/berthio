@@ -1027,6 +1027,22 @@ tbody tr:hover { background: var(--surface-2); }
 .info-note { display: flex; gap: 8px; align-items: flex-start; padding: 8px 12px; border-radius: 8px; background: var(--sky-soft); border: 1px solid var(--line); color: var(--text-2); font-size: 12px; line-height: 1.5; }
 .info-note svg { width: 14px; height: 14px; flex: 0 0 14px; color: var(--sky); margin-top: 1px; }
 
+/* ---------- 软件更新 ---------- */
+.update-state { font-size: 12px; line-height: 1.55; color: var(--text-2); min-height: 18px; }
+.update-state.bad { color: var(--danger); }
+.update-state.good { color: var(--ok, #2f9e6e); }
+.update-progress { margin-top: 8px; }
+.update-progress-bar { height: 6px; border-radius: 4px; background: var(--surface-3); overflow: hidden; border: 1px solid var(--line); }
+.update-progress-bar span { display: block; height: 100%; width: 0; background: var(--sky); transition: width .2s linear; }
+.update-progress-bar.indeterminate span { width: 34%; animation: update-slide 1.1s ease-in-out infinite; }
+@keyframes update-slide { 0% { margin-left: -34%; } 100% { margin-left: 100%; } }
+.update-progress-text { margin-top: 5px; font-family: var(--mono); font-size: 10.5px; color: var(--muted); }
+.update-errors { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.update-error-row { display: flex; gap: 8px; padding: 5px 8px; border-radius: 6px; background: color-mix(in srgb, var(--danger) 8%, transparent); border: 1px solid color-mix(in srgb, var(--danger) 18%, var(--line)); font-size: 10.5px; line-height: 1.45; }
+.update-error-row b { flex: 0 0 auto; color: var(--danger); font-weight: 600; }
+.update-error-row span { color: var(--text-2); overflow-wrap: anywhere; }
+#update-home { text-decoration: none; }
+
 /* ---------- responsive ---------- */
 @media (max-width: 1240px) {
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
@@ -2289,6 +2305,39 @@ tbody tr:hover { background: var(--surface-2); }
             </div>
           </div>
 
+          <div class="card" id="update-card">
+            <div class="card-head"><div><h3>软件更新</h3><p>清单签名校验 · 多源回退 · 失败不落位</p></div><div class="card-actions"><span class="badge muted plain" id="update-current-badge">—</span></div></div>
+            <div class="setting-block">
+              <div class="kv"><span class="k">当前版本</span><span class="v" id="update-current-version">—</span></div>
+              <div class="kv" id="update-meta" style="display:none">
+                <span class="k">新版本</span>
+                <span class="v plain"><b id="update-new-version">—</b> · <span id="update-size">—</span> · 来源 <span id="update-source">—</span></span>
+              </div>
+              <div class="field" style="margin-top:10px;max-width:300px">
+                <label for="update-mirror">更新源（镜像优先）</label>
+                <select class="select" id="update-mirror"><option value="auto">自动：官方 → 镜像</option></select>
+              </div>
+              <div class="update-state" id="update-status" style="margin-top:10px">尚未检查更新。</div>
+              <div class="update-progress" id="update-progress" style="display:none">
+                <div class="update-progress-bar" id="update-progress-bar"><span id="update-progress-fill"></span></div>
+                <div class="update-progress-text" id="update-progress-text"></div>
+              </div>
+              <div class="update-errors" id="update-errors" style="display:none"></div>
+              <div class="setting-actions">
+                <button class="btn btn-primary" id="update-check">检查更新</button>
+                <button class="btn" id="update-update" style="display:none">更新</button>
+                <button class="btn" id="update-save" style="display:none">仅下载</button>
+                <button class="btn" id="update-install" style="display:none">安装</button>
+                <button class="btn btn-soft" id="update-retry" style="display:none">重试</button>
+                <a class="btn btn-soft" id="update-home" href="https://github.com/yunyu697/berthio" target="_blank" rel="noopener">打开主页</a>
+              </div>
+              <div class="info-note" style="margin-top:10px">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v.1M12 11v5"></path></svg>
+                完整性校验不可跳过：没有可用公钥、签名不匹配、版本或文件名与签名绑定不符，一律拒绝。「更新」会替换当前程序并自动重启；「仅下载」只落到下载目录，可在面板内二次校验后安装。
+              </div>
+            </div>
+          </div>
+
           <div class="card">
             <div class="card-head"><div><h3>关于与诊断</h3><p>Berthio · 产品名</p></div><div class="card-actions"><span class="badge muted plain" id="about-version">—</span></div></div>
             <div class="setting-block">
@@ -2297,7 +2346,7 @@ tbody tr:hover { background: var(--surface-2); }
               <div class="kv"><span class="k">与 ferry 关系</span><span class="v plain">OpenWrt 接管交给 ferry，本项目只出配置与订阅</span></div>
               <div class="kv"><span class="k">与 Sidebay 关系</span><span class="v plain">Linux 旁路由接管交给 Sidebay，本项目不复用其代码</span></div>
               <div class="kv"><span class="k">许可证</span><span class="v plain">面板自身待定 · 内核按其上游许可证</span></div>
-              <div class="setting-actions"><button class="btn" data-toast="已打开诊断页">查看诊断</button><button class="btn" data-toast="已检查更新：无新版本（示例）">检查更新</button></div>
+              <div class="setting-actions"><button class="btn" data-toast="已打开诊断页">查看诊断</button></div>
             </div>
           </div>
         </div>

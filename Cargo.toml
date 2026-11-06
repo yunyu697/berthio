@@ -1,6 +1,6 @@
 [package]
 name = "berthio"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Berthio 服务端入站代理面板（控制面）"
@@ -22,6 +22,8 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] }
 # 3x-ui 迁移只读读取 SQLite 快照；bundled 让 Windows/Linux/CI 行为一致，不依赖系统 sqlite3。
 rusqlite = { version = "0.32", features = ["bundled"] }
+# 自更新只做 minisign 验签（Ed25519），不引入完整 minisign 工具链。
+minisign-verify = "0.3"
 
 [profile.release]
 opt-level = "s"

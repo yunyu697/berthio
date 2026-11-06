@@ -37,11 +37,23 @@
   var UI = {
     panel: null, inbounds: [], rules: null, kernels: null, logs: null, defaults: null,
     sources: null, lastFetch: null,
+    update: { status: null, poll: null, lastAction: 'check' },
     export: {
       format: 'clash', scenario: 'desktop', bucket: '112',
       rules: {}, order: [], preset: 'daily', nodeSel: {}, preview: null, ack: false, timer: null
     }
   };
+
+  function defaultDemoUpdate() {
+    return {
+      current_version: (FIX && FIX.panel && FIX.panel.version) || '1.0.0',
+      homepage: 'https://github.com/yunyu697/berthio',
+      feed: 'https://github.com/yunyu697/berthio/releases/download/updates/latest.json',
+      mirror: 'auto', mirrors: [], has_pubkey: true, install_supported: true, demo: true,
+      phase: 'idle', busy: false, checked: false, available: null,
+      progress: null, attempts: [], error: null, saved: null, last_install: null
+    };
+  }
 
   // 演示模式下的静态导入预览（与真实接口同一形状，不写状态）。
   var DEMO_IMPORT_PREVIEW = {
@@ -85,6 +97,16 @@
     if (path === '/api/panel') {
       if (FIX && FIX.panel) FIX.panel.panel_address = body.panel_address || FIX.panel.panel_address;
       return { ok: true, panel_address: body.panel_address };
+    }
+    if (path === '/api/update/check') {
+      var u = FIX.update || (FIX.update = defaultDemoUpdate());
+      u.phase = 'checking'; u.busy = true; u.error = null;
+      setTimeout(function () {
+        u.phase = 'latest'; u.busy = false; u.checked = true; u.available = false;
+        u.version = u.current_version;
+        u.attempts = [{ source: '官方 GitHub', url: '', ok: true, error: '' }];
+      }, 700);
+      return { started: true };
     }
     return { ok: true };
   }
@@ -171,6 +193,7 @@
       if (key === '/api/inbound/inbounds') return Promise.resolve({ items: clone(UI.inbounds), total: UI.inbounds.length, kernels: { xray: UI.inbounds.length }, selection: {} });
       if (key === '/api/inbound/wizard/defaults') return Promise.resolve(clone(FIX.defaults));
       if (key === '/api/panel') return Promise.resolve(clone(FIX.panel));
+      if (key === '/api/update/status') return Promise.resolve(clone(FIX.update || defaultDemoUpdate()));
       if (key.indexOf('/api/inbound/inbounds/') === 0 && key.slice(-8) === '/clients') {
         var iid = decodeURIComponent(key.slice('/api/inbound/inbounds/'.length, key.length - '/clients'.length));
         return Promise.resolve({ inbound_id: iid, items: clone((FIX.clients || {})[iid] || []) });
@@ -274,6 +297,7 @@
     bindTokenActions();
     bindMirrorEvents();
     bindImportEvents();
+    bindUpdateEvents();
     if (DEMO) {
       AUTH.csrf = 'demo-csrf';
       loadAll();
@@ -285,7 +309,7 @@
   function loadAll() {
     return Promise.all([
       api('/api/panel'), api('/api/inbound/inbounds'), api('/api/rulesets'), api('/api/kernels'), api('/api/logs'),
-      api('/api/inbound/wizard/defaults'), api('/api/rulesets/sources')
+      api('/api/inbound/wizard/defaults'), api('/api/rulesets/sources'), api('/api/update/status')
     ]).then(function (r) {
       UI.panel = r[0];
       UI.inbounds = r[1].items || [];
@@ -294,6 +318,7 @@
       UI.logs = r[4];
       UI.defaults = r[5];
       UI.sources = r[6];
+      UI.update.status = r[7];
       if ((UI.panel && UI.panel.demo) || DEMO) $('#demo-banner').classList.add('show');
       renderChrome();
       renderOverview();
@@ -305,6 +330,7 @@
       renderMirrorCard();
       renderLogs();
       renderSettings();
+      renderUpdate();
       initExportDefaults();
       schedulePreview();
     }).catch(function (e) {
@@ -1385,6 +1411,238 @@
     var foot = $('#auth-foot');
     if (foot && auth.password_storage) foot.textContent = auth.password_storage + '；Cookie ' + (auth.cookie || 'HttpOnly') + '。';
   }
+  /* ---------------- 软件更新 ---------------- */
+  function fmtPct(n) {
+    n = Number(n) || 0;
+    return (Math.round(n * 10) / 10) + '%';
+  }
+  function setVisible(sel, show) {
+    var el = $(sel);
+    if (el) el.style.display = show ? '' : 'none';
+  }
+  function setDisabled(sel, disabled) {
+    var el = $(sel);
+    if (el) el.disabled = !!disabled;
+  }
+
+  function renderUpdate() {
+    if (!$('#update-card')) return;
+    var s = UI.update.status || {};
+    var phase = s.phase || 'idle';
+    var busy = !!s.busy || ['checking', 'downloading', 'verifying', 'installing'].indexOf(phase) >= 0;
+    var current = s.current_version || (UI.panel && UI.panel.version) || '—';
+    $('#update-current-version').textContent = current;
+    $('#update-current-badge').textContent = 'v' + current;
+
+    var sel = $('#update-mirror');
+    if (sel) {
+      var mirrors = s.mirrors || [];
+      var optionHtml = '<option value="auto">自动：官方 → 镜像</option>' + mirrors.map(function (m) {
+        return '<option value="' + esc(m.id) + '">优先镜像 ' + esc(m.id) + '</option>';
+      }).join('');
+      if (sel.dataset.options !== optionHtml) {
+        sel.innerHTML = optionHtml;
+        sel.dataset.options = optionHtml;
+      }
+      var want = s.mirror || 'auto';
+      if (sel.value !== want) sel.value = want;
+      sel.disabled = busy;
+    }
+
+    var available = s.available === true;
+    setVisible('#update-meta', available);
+    if (available) {
+      $('#update-new-version').textContent = 'v' + (s.version || '—');
+      $('#update-size').textContent = s.asset_size ? fmtBytes(s.asset_size) : '大小未知';
+      $('#update-source').textContent = s.source || '—';
+    }
+
+    var saved = s.saved || null;
+    var st = $('#update-status');
+    var p = s.progress || {};
+    var text;
+    st.className = 'update-state';
+    if (phase === 'checking') {
+      text = '正在检查更新…' + (p.attempt ? '（第 ' + p.attempt + ' 个源：' + (p.source || '') + '）' : '');
+    } else if (phase === 'downloading') {
+      text = '正在下载 v' + (s.version || '') +
+        (p.total ? ' · ' + fmtPct(p.percent) + '（' + fmtBytes(p.received) + ' / ' + fmtBytes(p.total) + '）' : '') +
+        (p.source ? ' · 来源 ' + p.source : '');
+    } else if (phase === 'verifying') {
+      text = '下载完成，正在校验签名…';
+    } else if (phase === 'installing') {
+      text = '正在替换程序并自动重启…';
+    } else if (phase === 'ready') {
+      text = '已下载并校验通过：' + ((saved && saved.path) || '下载目录');
+      st.className = 'update-state good';
+    } else if (phase === 'error') {
+      text = s.error || '更新失败';
+      st.className = 'update-state bad';
+    } else if (phase === 'latest') {
+      text = '当前已是最新版本（v' + (s.version || current) + '）。';
+      st.className = 'update-state good';
+    } else if (phase === 'available') {
+      text = '发现新版本 v' + (s.version || '') + '，可更新或仅下载。';
+    } else {
+      text = s.checked === false ? '尚未检查更新。' : '尚未检查更新。';
+    }
+    if (saved && phase !== 'ready' && phase !== 'error') {
+      text += ' 已下载 v' + saved.version + '（校验通过），可安装。';
+    }
+    st.textContent = text;
+
+    var showProgress = busy && ['checking', 'downloading', 'verifying', 'installing'].indexOf(phase) >= 0 &&
+      !(phase === 'installing' && UI.update.waiting);
+    setVisible('#update-progress', showProgress);
+    if (showProgress) {
+      var bar = $('#update-progress-bar');
+      var fill = $('#update-progress-fill');
+      if (phase === 'downloading' && p.total > 0) {
+        bar.classList.remove('indeterminate');
+        fill.style.width = fmtPct(p.percent);
+      } else {
+        bar.classList.add('indeterminate');
+        fill.style.width = '';
+      }
+      $('#update-progress-text').textContent = phase === 'checking' ? '逐个尝试更新源，读取清单'
+        : phase === 'verifying' ? '校验清单签名与文件完整性'
+        : phase === 'installing' ? '替换程序并重启'
+        : ((p.source || '') + ' · ' + fmtBytes(p.received) + (p.total ? ' / ' + fmtBytes(p.total) : '') + (p.total ? ' · ' + fmtPct(p.percent) : ''));
+    }
+
+    var fails = (s.attempts || []).filter(function (a) { return !a.ok; });
+    var box = $('#update-errors');
+    if (fails.length) {
+      box.style.display = '';
+      box.innerHTML = fails.map(function (a) {
+        return '<div class="update-error-row"><b>' + esc(a.source) + '</b><span>' + esc(a.error) + '</span></div>';
+      }).join('');
+    } else {
+      box.style.display = 'none';
+      box.innerHTML = '';
+    }
+
+    var savedSame = !!(saved && available && saved.version === s.version);
+    setVisible('#update-update', available && !busy);
+    setVisible('#update-save', available && !busy && !savedSame);
+    setVisible('#update-install', !!saved && !busy && (!available || savedSame));
+    setVisible('#update-retry', phase === 'error' && !busy);
+    setDisabled('#update-check', busy);
+    setDisabled('#update-update', busy);
+    setDisabled('#update-save', busy);
+    setDisabled('#update-install', busy);
+    $('#update-check').textContent = phase === 'checking' ? '检查中…' : '检查更新';
+  }
+
+  function pollUpdate(done) {
+    stopUpdatePoll();
+    function fetchStatus() {
+      return api('/api/update/status').then(function (s) {
+        UI.update.status = s;
+        renderUpdate();
+        if (s.phase === 'installing' && !s.busy) {
+          stopUpdatePoll();
+          return;
+        }
+        if (s.phase === 'installing' && !UI.update.waiting) {
+          stopUpdatePoll();
+          UI.update.waiting = true;
+          waitForRestart();
+          return;
+        }
+        if (!s.busy) {
+          stopUpdatePoll();
+          if (done) done(s);
+        }
+      }).catch(function () { /* 更新重启期间连接会中断，由 waitForRestart 兜底 */ });
+    }
+    UI.update.poll = setInterval(fetchStatus, 600);
+    return fetchStatus();
+  }
+
+  function stopUpdatePoll() {
+    if (UI.update.poll) {
+      clearInterval(UI.update.poll);
+      UI.update.poll = null;
+    }
+  }
+
+  function waitForRestart() {
+    var tries = 0;
+    setTimeout(function () {
+      var timer = setInterval(function () {
+        tries++;
+        fetch('/healthz', { cache: 'no-store' }).then(function (r) {
+          if (r.ok) {
+            clearInterval(timer);
+            UI.update.waiting = false;
+            location.reload();
+          }
+        }).catch(function () {});
+        if (tries >= 90) {
+          clearInterval(timer);
+          UI.update.waiting = false;
+          toast('更新已提交', '若页面未自动恢复，请手动刷新');
+        }
+      }, 1000);
+    }, 2500);
+  }
+
+  function startUpdateCheck() {
+    UI.update.lastAction = 'check';
+    setDisabled('#update-check', true);
+    $('#update-check').textContent = '检查中…';
+    api('/api/update/check', { method: 'POST', body: JSON.stringify({}) })
+      .then(function () { pollUpdate(); })
+      .catch(function (e) { toast('检查更新失败', e.message); pollUpdate(); });
+  }
+
+  function startUpdateDownload(save) {
+    UI.update.lastAction = save ? 'save' : 'install';
+    api('/api/update/download', { method: 'POST', body: JSON.stringify({ save: !!save }) })
+      .then(function () { pollUpdate(); })
+      .catch(function (e) { toast('下载失败', e.message); pollUpdate(); });
+  }
+
+  function startSavedInstall() {
+    var saved = (UI.update.status || {}).saved;
+    if (!saved) return;
+    UI.update.lastAction = 'install';
+    api('/api/update/install', { method: 'POST', body: JSON.stringify({ path: saved.path }) })
+      .then(function () { pollUpdate(); })
+      .catch(function (e) { toast('安装失败', e.message); });
+  }
+
+  function retryUpdate() {
+    if (UI.update.lastAction === 'save' || UI.update.lastAction === 'install') {
+      startUpdateDownload(UI.update.lastAction === 'save');
+    } else {
+      startUpdateCheck();
+    }
+  }
+
+  function bindUpdateEvents() {
+    var check = $('#update-check');
+    if (check) check.addEventListener('click', startUpdateCheck);
+    var update = $('#update-update');
+    if (update) update.addEventListener('click', function () { startUpdateDownload(false); });
+    var save = $('#update-save');
+    if (save) save.addEventListener('click', function () { startUpdateDownload(true); });
+    var install = $('#update-install');
+    if (install) install.addEventListener('click', startSavedInstall);
+    var retry = $('#update-retry');
+    if (retry) retry.addEventListener('click', retryUpdate);
+    var mirror = $('#update-mirror');
+    if (mirror) mirror.addEventListener('change', function () {
+      api('/api/panel', { method: 'PATCH', body: JSON.stringify({ update_mirror: mirror.value }) })
+        .then(function () {
+          toast('更新源已切换', mirror.value === 'auto' ? '官方 → 镜像' : '优先镜像 ' + mirror.value);
+          api('/api/update/status').then(function (s) { UI.update.status = s; renderUpdate(); });
+        })
+        .catch(function (e) { toast('切换失败', e.message); });
+    });
+  }
+
   function stateListenIsLoopback(host) {
     return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]' || /^127\./.test(host);
   }

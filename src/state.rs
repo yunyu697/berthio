@@ -38,6 +38,54 @@ pub struct RemoteAccess {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateMirror {
+    pub id: String,
+    pub prefix: String,
+}
+
+/// 自更新配置。`pubkey` 为空时用内置项目公钥；显式配置可覆盖（自建源/派生版本）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    #[serde(default = "default_update_feed")]
+    pub feed: String,
+    /// `auto`（官方 → 镜像）或镜像 id（该镜像 → 官方 → 其余镜像）。
+    #[serde(default = "default_update_mirror")]
+    pub mirror: String,
+    /// base64(minisign 公钥文件全文)。
+    #[serde(default)]
+    pub pubkey: String,
+    #[serde(default = "default_update_mirrors")]
+    pub mirrors: Vec<UpdateMirror>,
+}
+
+fn default_update_feed() -> String {
+    crate::update::DEFAULT_FEED.to_string()
+}
+fn default_update_mirror() -> String {
+    "auto".to_string()
+}
+fn default_update_mirrors() -> Vec<UpdateMirror> {
+    crate::update::DEFAULT_MIRRORS
+        .iter()
+        .map(|(id, prefix)| UpdateMirror {
+            id: id.to_string(),
+            prefix: prefix.to_string(),
+        })
+        .collect()
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            feed: default_update_feed(),
+            mirror: default_update_mirror(),
+            pubkey: String::new(),
+            mirrors: default_update_mirrors(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PanelConfig {
     #[serde(default = "default_schema")]
     pub schema_version: u32,
@@ -51,6 +99,8 @@ pub struct PanelConfig {
     /// 远程监听必须显式确认；未确认时强制回环。
     #[serde(default)]
     pub remote_access: RemoteAccess,
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 fn default_schema() -> u32 {
@@ -68,6 +118,7 @@ impl Default for PanelConfig {
             panel_address: String::new(),
             log_keep_days: 14,
             remote_access: RemoteAccess::default(),
+            update: UpdateConfig::default(),
         }
     }
 }
