@@ -2148,8 +2148,24 @@ tbody tr:hover { background: var(--surface-2); }
               <input class="input" id="log-search" placeholder="搜索关键字，例如 rollback" aria-label="搜索日志">
               <span class="badge ok plain" style="margin-left:auto">日志脱敏开启</span>
             </div>
+            <div class="log-toolbar" id="audit-filters" style="flex-wrap:wrap;gap:8px;margin-top:10px">
+              <input class="input" id="audit-from" type="date" aria-label="起始日期" style="max-width:150px">
+              <input class="input" id="audit-to" type="date" aria-label="结束日期" style="max-width:150px">
+              <input class="input" id="audit-actor" placeholder="操作者" aria-label="操作者" style="max-width:110px">
+              <input class="input" id="audit-action" placeholder="动作，如 auth.login" aria-label="动作" style="max-width:180px">
+              <select class="input" id="audit-result" aria-label="结果" style="max-width:130px">
+                <option value="">全部结果</option>
+                <option value="ok">ok</option>
+                <option value="failed">failed</option>
+                <option value="denied">denied</option>
+                <option value="locked">locked</option>
+              </select>
+              <input class="input" id="audit-q" placeholder="关键字" aria-label="关键字" style="max-width:150px">
+              <button class="btn btn-soft" id="audit-refresh">查询</button>
+              <button class="btn" id="audit-export">导出 CSV</button>
+            </div>
             <div class="log-stream" id="log-stream"></div>
-            <div class="log-foot"><span>显示 10 / 2,418 行</span><span>·</span><span>轮转：14 天 / 50 MB</span><span style="margin-left:auto">只读视图 · 敏感字段已打码</span></div>
+            <div class="log-foot"><span id="audit-foot">只读 · 只追加</span><span>·</span><span>轮转：按月 / 8 MB，保留 log_keep_days 天</span><span style="margin-left:auto">无删除或清空接口 · 敏感字段已脱敏</span></div>
           </div>
 
           <div class="stack">
@@ -2173,7 +2189,7 @@ tbody tr:hover { background: var(--surface-2); }
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"></path></svg>
                     运行配置自检
                   </button>
-                  <button class="btn" data-toast="已导出审计日志（示例）">
+                  <button class="btn" id="audit-export-diag">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5M9 13h6M9 17h4"></path></svg>
                     导出审计日志
                   </button>

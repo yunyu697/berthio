@@ -291,6 +291,7 @@
     $('#tls-generate').addEventListener('click', generateTlsCert);
     $('#wz-protocol').addEventListener('change', updateWizardFields);
     $('#wz-port').addEventListener('input', updateWizardFields);
+    bindAuditEvents();
 
     bindAuthEvents();
     bindProcessEvents();
@@ -330,6 +331,7 @@
       renderProcesses();
       renderMirrorCard();
       renderLogs();
+      if (!DEMO) loadAudit();
       renderSettings();
       renderUpdate();
       initExportDefaults();
@@ -1371,18 +1373,72 @@
     box.innerHTML = rows + matrix + buckets;
   }
 
-  /* ---------------- 日志 ---------------- */
+  /* ---------------- 日志 / 审计 ---------------- */
+  function auditQuery() {
+    var parts = [];
+    [['from', '#audit-from'], ['to', '#audit-to'], ['actor', '#audit-actor'], ['action', '#audit-action'], ['result', '#audit-result'], ['q', '#audit-q']].forEach(function (p) {
+      var el = $(p[1]);
+      var v = el ? String(el.value || '').trim() : '';
+      if (v) parts.push(p[0] + '=' + encodeURIComponent(v));
+    });
+    parts.push('limit=200');
+    return parts.join('&');
+  }
+
+  function loadAudit() {
+    if (DEMO || !$('#log-stream')) return Promise.resolve();
+    return api('/api/audit?' + auditQuery())
+      .then(function (r) { UI.audit = r; renderLogs(); })
+      .catch(function (err) { toast('审计查询失败', err.message); });
+  }
+
+  function exportAudit() {
+    if (DEMO) { toast('演示模式不导出'); return; }
+    window.open('/api/audit.csv?' + auditQuery(), '_blank');
+    toast('已开始导出 CSV', '筛选条件与当前查询一致');
+  }
+
+  function bindAuditEvents() {
+    if ($('#audit-refresh')) $('#audit-refresh').addEventListener('click', loadAudit);
+    if ($('#audit-export')) $('#audit-export').addEventListener('click', exportAudit);
+    if ($('#audit-export-diag')) $('#audit-export-diag').addEventListener('click', exportAudit);
+  }
+
   function renderLogs() {
     var box = $('#log-stream');
     if (!box) return;
-    var items = (UI.logs && UI.logs.items) || [];
-    box.innerHTML = items.map(function (e) {
-      var ts = String(e.ts || '').replace('T', ' ').replace('Z', '');
-      var time = ts.split(' ')[1] || ts;
-      return '<div class="log-line" data-level="audit"><span class="log-time">' + esc(time) + '</span><span class="log-lv audit">AUDIT</span><span class="log-msg">' + esc(e.event || '') + ' · ' + esc(JSON.stringify(e.detail || {})) + '</span></div>';
-    }).join('') || '<div class="log-line"><span class="log-msg">暂无审计事件。创建入站或导出后会出现。</span></div>';
-    var foot = $('.log-foot span');
-    if (foot) foot.textContent = '显示 ' + items.length + ' 行';
+    var meta = UI.audit;
+    if (!meta) {
+      var demoItems = (UI.logs && UI.logs.items) || [];
+      box.innerHTML = demoItems.map(function (e) {
+        var ts = String(e.ts || '').replace('T', ' ').replace('Z', '');
+        var time = ts.split(' ')[1] || ts;
+        return '<div class="log-line" data-level="audit"><span class="log-time">' + esc(time) + '</span><span class="log-lv audit">AUDIT</span><span class="log-msg">' + esc(e.event || '') + ' · ' + esc(JSON.stringify(e.detail || {})) + '</span></div>';
+      }).join('') || '<div class="log-line"><span class="log-msg">暂无审计事件。</span></div>';
+      var foot0 = $('.log-foot span');
+      if (foot0) foot0.textContent = '显示 ' + demoItems.length + ' 行';
+      return;
+    }
+    var items = meta.items || [];
+    var health = meta.health || {};
+    var warn = '';
+    if (health.failures > 0) {
+      warn = '<div class="info-note" style="margin:8px 0">审计写入失败 ' + esc(String(health.failures)) + ' 次：' + esc(health.last_error || '') + '（业务操作未受影响）</div>';
+    }
+    var rows = items.map(function (e) {
+      var badge = e.result === 'ok' ? 'ok' : 'warn';
+      return '<tr><td class="mono">' + esc(e.ts || '') + '</td><td>' + esc(e.actor || '') + '</td>' +
+        '<td class="mono">' + esc(e.ip || '') + '</td><td class="mono">' + esc(e.action || e.event || '') + '</td>' +
+        '<td class="mono">' + esc(e.target || '') + '</td><td><span class="badge ' + badge + ' plain">' + esc(e.result || '') + '</span></td>' +
+        '<td class="mono" style="max-width:420px;white-space:pre-wrap">' + esc(JSON.stringify(e.detail || {})) + '</td></tr>';
+    }).join('');
+    box.innerHTML = warn +
+      '<div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>来源 IP</th><th>动作</th><th>目标</th><th>结果</th><th>详情</th></tr></thead><tbody>' +
+      rows + (items.length ? '' : '<tr><td colspan="7" class="muted">没有匹配的审计记录</td></tr>') +
+      '</tbody></table></div>';
+    var foot = $('#audit-foot');
+    var retention = meta.retention || {};
+    if (foot) foot.textContent = '命中 ' + items.length + ' 条 · 扫描 ' + (meta.scanned || 0) + ' 条 / ' + (meta.files || 0) + ' 个文件 · 保留 ' + (retention.keep_days || '—') + ' 天';
   }
 
   /* ---------------- 设置 ---------------- */

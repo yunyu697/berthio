@@ -624,11 +624,11 @@ fn route(
         ("POST", "/api/tls/generate") => tls_generate(store, &actor, &net),
         ("PATCH", "/api/panel") => patch_panel(req, store, &actor, &net),
         ("GET", "/api/update/status") => Ok(Response::json(200, &upd.status(&cfg.update))),
-        ("POST", "/api/update/check") => update_check(upd, store, demo, &actor),
-        ("POST", "/api/update/download") => update_download(req, upd, store, demo, &actor),
-        ("POST", "/api/update/install") => update_install(req, upd, store, demo, &actor),
+        ("POST", "/api/update/check") => update_check(upd, store, demo, &actor, &net.client_ip),
+        ("POST", "/api/update/download") => update_download(req, upd, store, demo, &actor, &net.client_ip),
+        ("POST", "/api/update/install") => update_install(req, upd, store, demo, &actor, &net.client_ip),
         ("GET", "/api/kernels") => Ok(Response::json(200, &kernel_payload(store, sup))),
-        ("POST", p) if p.starts_with("/api/kernels/") => kernel_action(store, sup, p),
+        ("POST", p) if p.starts_with("/api/kernels/") => kernel_action(store, sup, p, &actor, &net.client_ip),
         ("GET", p) if p.starts_with("/api/kernels/") && p.ends_with("/log") => {
             let name = &p["/api/kernels/".len()..p.len() - "/log".len()];
             let tail = req
@@ -655,14 +655,16 @@ fn route(
             sources::delete_source(store, id).map(|v| Response::json(200, &v))
         }
         ("GET", "/api/inbound/inbounds") => Ok(Response::json(200, &inbound_list(store))),
-        ("POST", "/api/inbound/inbounds") => create_inbound(req, store),
+        ("POST", "/api/inbound/inbounds") => create_inbound(req, store, &actor, &net.client_ip),
         ("GET", "/api/inbound/wizard/defaults") => Ok(Response::json(200, &wizard::defaults(store))),
-        ("GET", "/api/export/preview") => export_preview(req, store),
-        ("GET", "/api/export/file") => export_file(req, store),
+        ("GET", "/api/export/preview") => export_preview(req, store, &actor, &net.client_ip),
+        ("GET", "/api/export/file") => export_file(req, store, &actor, &net.client_ip),
         ("POST", "/api/export/tokens") => create_token(req, store),
-        ("POST", "/api/migrate/preview") => migrate_preview(req, store),
-        ("POST", "/api/migrate/apply") => migrate_apply(req, store),
+        ("POST", "/api/migrate/preview") => migrate_preview(req, store, &actor, &net.client_ip),
+        ("POST", "/api/migrate/apply") => migrate_apply(req, store, &actor, &net.client_ip),
         ("GET", "/api/logs") => Ok(Response::json(200, &logs_payload(store))),
+        ("GET", "/api/audit") => Ok(Response::json(200, &audit_payload(store, req))),
+        ("GET", "/api/audit.csv") => audit_csv(store, req),
         ("GET", p) if p.starts_with("/sub/") => subscription(req, &p[5..], store),
         ("GET", p) if p.starts_with("/api/inbound/inbounds/") => {
             let rest = &p["/api/inbound/inbounds/".len()..];
@@ -674,7 +676,7 @@ fn route(
         }
         ("POST", p) if p.starts_with("/api/inbound/inbounds/") && p.ends_with("/clients") => {
             let id = &p["/api/inbound/inbounds/".len()..p.len() - "/clients".len()];
-            create_client(req, store, id)
+            create_client(req, store, id, &actor, &net.client_ip)
         }
         ("POST", p) if p.starts_with("/api/export/tokens/") && p.ends_with("/revoke") => {
             let id = &p["/api/export/tokens/".len()..p.len() - "/revoke".len()];
@@ -705,10 +707,13 @@ fn auth_setup(req: &Request, store: &Store, auth: &Auth) -> ApiResult<Response> 
     let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
     let confirm = body.get("confirm").and_then(|v| v.as_str()).unwrap_or("");
     let out = auth.setup(password, confirm)?;
-    store.audit(
+    store.audit_op(
         "auth.setup",
         "anonymous",
-        json!({"initialized": true, "password_storage": "pbkdf2-hmac-sha256", "plaintext_logged": false}),
+        &req.peer_ip,
+        "panel",
+        "ok",
+        json!({"initialized": true, "hash_algo": "pbkdf2-hmac-sha256", "plaintext_logged": false}),
     );
     Ok(Response::json(200, &out))
 }
@@ -721,20 +726,30 @@ fn auth_login(req: &Request, store: &Store, auth: &Auth, net: &NetInfo) -> ApiRe
     }
     match auth.login(password, &net.client_ip) {
         Ok((payload, token, _csrf)) => {
-            store.audit(
+            store.audit_op(
                 "auth.login",
                 "admin",
-                json!({"ip": net.client_ip, "peer_ip": req.peer_ip, "behind_proxy": net.behind_proxy, "secure_cookie": net.https}),
+                &net.client_ip,
+                "session",
+                "ok",
+                json!({"peer_ip": req.peer_ip, "behind_proxy": net.behind_proxy, "secure_cookie": net.https}),
             );
             let max_age = auth.session_ttl();
             Ok(Response::json(200, &payload).with("Set-Cookie", session_cookie(&token, max_age, net.https)))
         }
         Err(e) => {
-            let event = if e.status == 429 { "auth.login.locked" } else { "auth.login.failed" };
-            store.audit(
+            let (event, result) = if e.status == 429 {
+                ("auth.login.locked", "locked")
+            } else {
+                ("auth.login.failed", "failed")
+            };
+            store.audit_op(
                 event,
                 "anonymous",
-                json!({"ip": net.client_ip, "peer_ip": req.peer_ip, "code": e.code, "message": e.message}),
+                &net.client_ip,
+                "session",
+                result,
+                json!({"peer_ip": req.peer_ip, "code": e.code, "message": e.message}),
             );
             Err(e)
         }
@@ -849,10 +864,13 @@ fn tls_generate(store: &Store, actor: &str, net: &NetInfo) -> ApiResult<Response
     let cfg = Config { home: store.home.clone() };
     cfg.save_panel(&panel)?;
     store.set_config(panel.clone());
-    store.audit(
+    store.audit_op(
         "tls.cert.generated",
         actor,
-        json!({"fingerprint": info.fingerprint, "not_after": info.not_after, "sans": info.sans, "ip": net.client_ip}),
+        &net.client_ip,
+        "tls",
+        "ok",
+        json!({"fingerprint": info.fingerprint, "not_after": info.not_after, "sans": info.sans}),
     );
     Ok(Response::json(
         200,
@@ -1087,22 +1105,25 @@ fn patch_panel(req: &Request, store: &Store, actor: &str, net: &NetInfo) -> ApiR
     ))
 }
 
-fn update_check(upd: &Arc<Manager>, store: &Store, demo: bool, actor: &str) -> ApiResult<Response> {
+fn update_check(upd: &Arc<Manager>, store: &Store, demo: bool, actor: &str, ip: &str) -> ApiResult<Response> {
     if demo {
         return Err(ApiError::bad_request("演示模式不检查更新"));
     }
     let cfg = store.config().update;
     upd.start_check(cfg.clone())
         .map_err(|e| ApiError::conflict(e).with_field("action", "等待当前更新任务结束后重试"))?;
-    store.audit(
+    store.audit_op(
         "update.check",
         actor,
+        ip,
+        "update",
+        "ok",
         json!({"feed": cfg.feed, "mirror": cfg.mirror}),
     );
     Ok(Response::json(202, &json!({"started": true})))
 }
 
-fn update_download(req: &Request, upd: &Arc<Manager>, store: &Store, demo: bool, actor: &str) -> ApiResult<Response> {
+fn update_download(req: &Request, upd: &Arc<Manager>, store: &Store, demo: bool, actor: &str, ip: &str) -> ApiResult<Response> {
     if demo {
         return Err(ApiError::bad_request("演示模式不执行下载"));
     }
@@ -1111,11 +1132,18 @@ fn update_download(req: &Request, upd: &Arc<Manager>, store: &Store, demo: bool,
     let cfg = store.config().update;
     upd.start_download(cfg, save)
         .map_err(|e| ApiError::conflict(e).with_field("action", "等待当前更新任务结束后重试"))?;
-    store.audit("update.download", actor, json!({"save": save}));
+    store.audit_op(
+        "update.download",
+        actor,
+        ip,
+        "update",
+        "ok",
+        json!({"save": save}),
+    );
     Ok(Response::json(202, &json!({"started": true, "save": save})))
 }
 
-fn update_install(req: &Request, upd: &Arc<Manager>, store: &Store, demo: bool, actor: &str) -> ApiResult<Response> {
+fn update_install(req: &Request, upd: &Arc<Manager>, store: &Store, demo: bool, actor: &str, ip: &str) -> ApiResult<Response> {
     if demo {
         return Err(ApiError::bad_request("演示模式不执行安装"));
     }
@@ -1128,7 +1156,14 @@ fn update_install(req: &Request, upd: &Arc<Manager>, store: &Store, demo: bool, 
     let cfg = store.config().update;
     upd.start_install_saved(cfg, path.clone())
         .map_err(|e| ApiError::conflict(e).with_field("action", "等待当前更新任务结束后重试"))?;
-    store.audit("update.install", actor, json!({"path": path}));
+    store.audit_op(
+        "update.install",
+        actor,
+        ip,
+        &path,
+        "ok",
+        json!({"path": path}),
+    );
     Ok(Response::json(202, &json!({"installing": true})))
 }
 
@@ -1153,7 +1188,7 @@ fn kernel_payload(store: &Store, sup: &Supervisor) -> serde_json::Value {
     base
 }
 
-fn kernel_action(store: &Store, sup: &Supervisor, path: &str) -> ApiResult<Response> {
+fn kernel_action(store: &Store, sup: &Supervisor, path: &str, actor: &str, ip: &str) -> ApiResult<Response> {
     let rest = &path["/api/kernels/".len()..];
     let (kernel, action) = rest
         .split_once('/')
@@ -1161,14 +1196,44 @@ fn kernel_action(store: &Store, sup: &Supervisor, path: &str) -> ApiResult<Respo
     if !supervisor::is_kernel(kernel) {
         return Err(ApiError::not_found(format!("未知内核 {kernel}")));
     }
+    let event = match action {
+        "start" => "kernel.start",
+        "stop" => "kernel.stop",
+        "restart" => "kernel.restart",
+        "validate" => "kernel.validate",
+        other => other,
+    };
     let out = match action {
-        "start" => sup.start(store, kernel)?,
-        "stop" => sup.stop(kernel)?,
-        "restart" => sup.restart(store, kernel)?,
-        "validate" => sup.validate(store, kernel)?,
+        "start" => sup.start(store, kernel),
+        "stop" => sup.stop(kernel),
+        "restart" => sup.restart(store, kernel),
+        "validate" => sup.validate(store, kernel),
         _ => return Err(ApiError::not_found(format!("未知动作 {action}"))),
     };
-    Ok(Response::json(200, &out))
+    match out {
+        Ok(v) => {
+            store.audit_op(
+                event,
+                actor,
+                ip,
+                kernel,
+                "ok",
+                json!({"kernel": kernel, "action": action}),
+            );
+            Ok(Response::json(200, &v))
+        }
+        Err(e) => {
+            store.audit_op(
+                event,
+                actor,
+                ip,
+                kernel,
+                "failed",
+                json!({"kernel": kernel, "action": action, "code": e.code, "message": e.message}),
+            );
+            Err(e)
+        }
+    }
 }
 
 fn inbound_list(store: &Store) -> serde_json::Value {
@@ -1253,40 +1318,51 @@ fn client_list(store: &Store, id: &str) -> serde_json::Value {
     }
 }
 
-fn create_inbound(req: &Request, store: &Store) -> ApiResult<Response> {
+fn create_inbound(req: &Request, store: &Store, actor: &str, ip: &str) -> ApiResult<Response> {
     let body = body_json(req)?;
     if body.is_null() {
         return Err(ApiError::bad_request("缺少 JSON 请求体"));
     }
     let payload: wizard::CreateInboundReq = serde_json::from_value(body)
         .map_err(|e| ApiError::bad_request(format!("字段解析失败: {e}")))?;
-    let out = wizard::create_inbound(store, payload)?;
+    let out = wizard::create_inbound(store, payload, actor, ip)?;
     Ok(Response::json(201, &out))
 }
 
-fn create_client(req: &Request, store: &Store, id: &str) -> ApiResult<Response> {
+fn create_client(req: &Request, store: &Store, id: &str, actor: &str, ip: &str) -> ApiResult<Response> {
     let body = body_json(req)?;
     let payload: wizard::CreateClientReq = serde_json::from_value(body)
         .map_err(|e| ApiError::bad_request(format!("字段解析失败: {e}")))?;
-    let out = wizard::create_client(store, id, payload)?;
+    let out = wizard::create_client(store, id, payload, actor, ip)?;
     Ok(Response::json(201, &out))
 }
 
-fn export_preview(req: &Request, store: &Store) -> ApiResult<Response> {
+fn export_preview(req: &Request, store: &Store, actor: &str, ip: &str) -> ApiResult<Response> {
     let sel = selection_from(req);
     let payload = export::render_payload(store, sel)?;
-    store.audit(
+    store.audit_op(
         "export.preview",
-        "local-admin",
+        actor,
+        ip,
+        "-",
+        "ok",
         json!({"render_id": payload["render_id"], "format": payload["format"], "entries": payload["entries"]}),
     );
     Ok(Response::json(200, &payload))
 }
 
-fn export_file(req: &Request, store: &Store) -> ApiResult<Response> {
+fn export_file(req: &Request, store: &Store, actor: &str, ip: &str) -> ApiResult<Response> {
     let sel = selection_from(req);
     let payload = export::render_payload(store, sel)?;
     if payload["validation"]["overall"] == "FAIL" {
+        store.audit_op(
+            "export.download",
+            actor,
+            ip,
+            "-",
+            "denied",
+            json!({"render_id": payload["render_id"], "reason": "validation_fail"}),
+        );
         return Err(ApiError::new(422, "export_blocked", "校验 FAIL，拒绝导出").with_field(
             "validation",
             "先修正 L0/L1/L2 中的失败项",
@@ -1294,9 +1370,12 @@ fn export_file(req: &Request, store: &Store) -> ApiResult<Response> {
     }
     let content = payload["content"].as_str().unwrap_or("").to_string();
     let name = payload["file_name"].as_str().unwrap_or("berthio-config.txt");
-    store.audit(
+    store.audit_op(
         "export.download",
-        "local-admin",
+        actor,
+        ip,
+        name,
+        "ok",
         json!({"render_id": payload["render_id"], "file_name": name, "bytes": content.len()}),
     );
     Ok(Response::file(content.into_bytes(), name).with(
@@ -1341,16 +1420,16 @@ fn migrate_label(body: &serde_json::Value) -> String {
     }
 }
 
-fn migrate_preview(req: &Request, store: &Store) -> ApiResult<Response> {
+fn migrate_preview(req: &Request, store: &Store, actor: &str, ip: &str) -> ApiResult<Response> {
     let body = body_json(req)?;
     let db_path = body.get("db_path").and_then(|v| v.as_str()).unwrap_or("");
     let json_text = migrate_json_text(&body);
     let label = migrate_label(&body);
-    let out = crate::migrate::preview(store, db_path, &json_text, &label)?;
+    let out = crate::migrate::preview(store, db_path, &json_text, &label, actor, ip)?;
     Ok(Response::json(200, &out))
 }
 
-fn migrate_apply(req: &Request, store: &Store) -> ApiResult<Response> {
+fn migrate_apply(req: &Request, store: &Store, actor: &str, ip: &str) -> ApiResult<Response> {
     let body = body_json(req)?;
     let out = crate::migrate::apply(
         store,
@@ -1360,6 +1439,8 @@ fn migrate_apply(req: &Request, store: &Store) -> ApiResult<Response> {
         body.get("preview_id").and_then(|v| v.as_str()).unwrap_or(""),
         body.get("plan_hash").and_then(|v| v.as_str()).unwrap_or(""),
         body.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false),
+        actor,
+        ip,
     )?;
     Ok(Response::json(200, &out))
 }
@@ -1784,4 +1865,82 @@ fn logs_payload(store: &Store) -> serde_json::Value {
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .collect();
     json!({"items": items, "month": month, "note": "审计日志只追加，不记录明文 token 与私钥"})
+}
+
+fn audit_query(req: &Request) -> crate::auditlog::Query {
+    let get = |k: &str| {
+        req.query
+            .get(k)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    };
+    crate::auditlog::Query {
+        from: get("from"),
+        to: get("to"),
+        actor: get("actor"),
+        action: get("action"),
+        result: get("result"),
+        keyword: get("q"),
+        limit: get("limit").parse::<usize>().unwrap_or(200),
+    }
+}
+
+fn audit_payload(store: &Store, req: &Request) -> serde_json::Value {
+    let q = audit_query(req);
+    let out = crate::auditlog::query(&store.home, &q);
+    json!({
+        "items": out.items,
+        "count": out.items.len(),
+        "scanned": out.scanned,
+        "files": out.files,
+        "dir": crate::auditlog::DIR,
+        "retention": {
+            "keep_days": store.config().log_keep_days,
+            "max_bytes": crate::auditlog::max_bytes(),
+        },
+        "health": crate::auditlog::health(),
+        "readonly": true,
+        "note": "只追加、只读；没有删除或清空接口。密码/私钥/订阅密文/uuid/token 在写入前已脱敏。",
+    })
+}
+
+fn audit_csv(store: &Store, req: &Request) -> ApiResult<Response> {
+    let q = audit_query(req);
+    let out = crate::auditlog::query(&store.home, &q);
+    let mut csv = String::from("时间,操作者,来源IP,动作,目标,结果,详情\n");
+    for item in &out.items {
+        let ts = item.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+        let actor = item.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+        let ip = item.get("ip").and_then(|v| v.as_str()).unwrap_or("");
+        let action = item.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let target = item.get("target").and_then(|v| v.as_str()).unwrap_or("");
+        let result = item.get("result").and_then(|v| v.as_str()).unwrap_or("");
+        let detail = item
+            .get("detail")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "{}".to_string());
+        let row = [ts, actor, ip, action, target, result, &detail]
+            .iter()
+            .map(|c| csv_cell(c))
+            .collect::<Vec<_>>()
+            .join(",");
+        csv.push_str(&row);
+        csv.push('\n');
+    }
+    let name = format!("berthio-audit-{}.csv", util::now_iso().replace(':', ""));
+    let mut resp = Response::file(csv.into_bytes(), &name);
+    resp.content_type = "text/csv; charset=utf-8";
+    // 审计导出本身也是一次操作，但不写回审计日志（避免导出引起日志自增循环）。
+    Ok(resp)
+}
+
+/// CSV 单元：双引号包裹 + 转义；以 = + - @ 开头的值加前缀，避免表格公式注入。
+fn csv_cell(raw: &str) -> String {
+    let mut s = raw.to_string();
+    if let Some(first) = s.chars().next() {
+        if matches!(first, '=' | '+' | '-' | '@') {
+            s.insert(0, '\'');
+        }
+    }
+    format!("\"{}\"", s.replace('"', "\"\""))
 }

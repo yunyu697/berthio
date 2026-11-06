@@ -162,7 +162,12 @@ pub struct CreateInboundReq {
     pub allow_unverified: bool,
 }
 
-pub fn create_inbound(store: &Store, req: CreateInboundReq) -> ApiResult<serde_json::Value> {
+pub fn create_inbound(
+    store: &Store,
+    req: CreateInboundReq,
+    actor: &str,
+    ip: &str,
+) -> ApiResult<serde_json::Value> {
     if req.remark.trim().is_empty() {
         return Err(ApiError::bad_request("名称（remark）必填").with_field("remark", "不能为空"));
     }
@@ -372,9 +377,12 @@ pub fn create_inbound(store: &Store, req: CreateInboundReq) -> ApiResult<serde_j
         Ok(())
     })?;
 
-    store.audit(
-        "inbound.wizard.committed",
-        "local-admin",
+    store.audit_op(
+        "inbound.created",
+        actor,
+        ip,
+        &id,
+        "ok",
         serde_json::json!({
             "inbound_id": id,
             "tag": tag,
@@ -383,8 +391,8 @@ pub fn create_inbound(store: &Store, req: CreateInboundReq) -> ApiResult<serde_j
             "security": security,
             "port": port,
             "l4": l4,
-            "target": req.target,
             "client_email": email,
+            "outbound_target": req.target,
             "transaction": "committed",
         }),
     );
@@ -448,7 +456,13 @@ pub struct CreateClientReq {
     pub expires_at: Option<String>,
 }
 
-pub fn create_client(store: &Store, inbound_id: &str, req: CreateClientReq) -> ApiResult<serde_json::Value> {
+pub fn create_client(
+    store: &Store,
+    inbound_id: &str,
+    req: CreateClientReq,
+    actor: &str,
+    ip: &str,
+) -> ApiResult<serde_json::Value> {
     let state = store.snapshot();
     let inbound = state
         .inbounds
@@ -492,9 +506,12 @@ pub fn create_client(store: &Store, inbound_id: &str, req: CreateClientReq) -> A
         target.updated_at = util::now_iso();
         Ok(())
     })?;
-    store.audit(
+    store.audit_op(
         "inbound.client.created",
-        "local-admin",
+        actor,
+        ip,
+        &format!("{inbound_id}/{client_id}"),
+        "ok",
         serde_json::json!({"inbound_id": inbound_id, "client_id": client_id, "email": email}),
     );
     Ok(serde_json::json!({

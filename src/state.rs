@@ -398,17 +398,34 @@ impl Store {
         util::write_atomic(&path, body.as_bytes()).map_err(ApiError::internal)
     }
 
+    /// 兼容旧调用点：来源 IP / 目标 / 结果从 `detail` 推导（推导不到就记 `-` / `ok`）。
     pub fn audit(&self, event: &str, actor: &str, detail: serde_json::Value) {
-        let stamp = util::now_iso();
-        let month = &stamp[0..7];
-        let line = serde_json::json!({
-            "ts": stamp,
-            "event": event,
-            "actor": actor,
-            "detail": detail,
-        });
-        let path = self.home.join(format!("logs/audit/{month}.jsonl"));
-        let _ = util::append_jsonl(&path, &line);
+        let ip = crate::auditlog::derive_ip(&detail);
+        let target = crate::auditlog::derive_target(&detail);
+        let result = crate::auditlog::derive_result(event, &detail);
+        self.audit_op(event, actor, &ip, &target, &result, detail);
+    }
+
+    /// 标准操作审计：时间、操作者、来源 IP、动作、目标、结果、补充详情。
+    pub fn audit_op(
+        &self,
+        action: &str,
+        actor: &str,
+        ip: &str,
+        target: &str,
+        result: &str,
+        detail: serde_json::Value,
+    ) {
+        crate::auditlog::write(
+            &self.home,
+            self.config().log_keep_days,
+            action,
+            actor,
+            ip,
+            target,
+            result,
+            detail,
+        );
     }
 
     pub fn home_path(&self, rel: &str) -> PathBuf {

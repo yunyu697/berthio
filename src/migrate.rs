@@ -1563,7 +1563,19 @@ fn source_audit(plan: &Plan) -> Value {
     })
 }
 
-pub fn preview(store: &Store, db_path: &str, json_text: &str, label: &str) -> ApiResult<Value> {
+/// 3x-ui 导入的来源标识，用于审计目标字段区分 DB / JSON 两条路径。
+fn source_target(plan: &Plan) -> String {
+    format!("3x-ui:{}", plan.source_kind)
+}
+
+pub fn preview(
+    store: &Store,
+    db_path: &str,
+    json_text: &str,
+    label: &str,
+    actor: &str,
+    ip: &str,
+) -> ApiResult<Value> {
     let plan = build_plan_any(store, db_path, json_text, label)?;
     let json_mode = plan.source_kind == "json";
     let out = json!({
@@ -1596,7 +1608,8 @@ pub fn preview(store: &Store, db_path: &str, json_text: &str, label: &str) -> Ap
             "确认 diff 后调用 POST /api/migrate/apply，body 带 db_path / preview_id / plan_hash / confirm=true"
         },
     });
-    store.audit("migrate.preview", "local-admin", source_audit(&plan));
+    let target = source_target(&plan);
+    store.audit_op("migrate.preview", actor, ip, &target, "ok", source_audit(&plan));
     Ok(out)
 }
 
@@ -1609,6 +1622,8 @@ pub fn apply(
     preview_id: &str,
     plan_hash: &str,
     confirm: bool,
+    actor: &str,
+    ip: &str,
 ) -> ApiResult<Value> {
     if !confirm {
         return Err(ApiError::bad_request(
@@ -1622,9 +1637,13 @@ pub fn apply(
     }
     let plan = build_plan_any(store, db_path, json_text, label)?;
     if plan.preview_id != preview_id || plan.plan_hash != plan_hash {
-        store.audit(
+        let target = source_target(&plan);
+        store.audit_op(
             "migrate.apply.rejected",
-            "local-admin",
+            actor,
+            ip,
+            &target,
+            "denied",
             json!({"reason": "plan_changed", "expected": plan_hash, "actual": plan.plan_hash}),
         );
         return Err(ApiError::new(
@@ -1687,7 +1706,8 @@ pub fn apply(
     let counts = plan.counts();
     let mut audit = source_audit(&plan);
     audit["imported_ids"] = json!(inserted);
-    store.audit("migrate.apply", "local-admin", audit);
+    let target = source_target(&plan);
+    store.audit_op("migrate.apply", actor, ip, &target, "ok", audit);
     Ok(json!({
         "ok": true,
         "preview_id": preview_id,
