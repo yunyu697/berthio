@@ -7,6 +7,7 @@
 
   var DEMO = !!window.__BERTHIO_DEMO_DATA__;
   var FIX = window.__BERTHIO_DEMO_DATA__ || null;
+  var AUTH = { csrf: '', demo: DEMO, status: null };
 
   function $(s, r) { return (r || document).querySelector(s); }
   function $$(s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); }
@@ -142,6 +143,7 @@
       if (key === '/api/rulesets') return Promise.resolve(clone(FIX.rulesets));
       if (key === '/api/rulesets/sources') return Promise.resolve(clone(FIX.sources || { sources: [] }));
       if (key === '/api/kernels') return Promise.resolve(clone(FIX.kernels));
+      if (key === '/api/auth/status') return Promise.resolve({ initialized: true, authenticated: true, demo: true, csrf_token: 'demo-csrf' });
       if (key === '/api/inbound/inbounds') return Promise.resolve({ items: clone(UI.inbounds), total: UI.inbounds.length, kernels: { xray: UI.inbounds.length }, selection: {} });
       if (key === '/api/inbound/wizard/defaults') return Promise.resolve(clone(FIX.defaults));
       if (key === '/api/panel') return Promise.resolve(clone(FIX.panel));
@@ -149,17 +151,27 @@
         var iid = decodeURIComponent(key.slice('/api/inbound/inbounds/'.length, key.length - '/clients'.length));
         return Promise.resolve({ inbound_id: iid, items: clone((FIX.clients || {})[iid] || []) });
       }
+      if (key.indexOf('/api/kernels') === 0) {
+        return Promise.resolve({ ok: false, demo: true, message: '演示模式不启动真实内核' });
+      }
       return Promise.resolve({});
     }
-    return fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}))
+    var method = (opts && opts.method) || 'GET';
+    var headers = { 'Content-Type': 'application/json' };
+    if (method !== 'GET' && AUTH.csrf) headers['X-Berthio-CSRF'] = AUTH.csrf;
+    var init = Object.assign({ credentials: 'same-origin' }, opts || {});
+    init.headers = headers;
+    return fetch(path, init)
       .then(function (res) {
         return res.text().then(function (text) {
           var body = text;
           try { body = JSON.parse(text); } catch (e) {}
           if (!res.ok) {
+            if (res.status === 401 && !DEMO) showAuth('login');
             var msg = (body && body.error && body.error.message) || ('HTTP ' + res.status);
             var err = new Error(msg);
             err.status = res.status;
+            err.code = body && body.error && body.error.code;
             err.fields = (body && body.error && body.error.fields) || [];
             throw err;
           }
@@ -228,13 +240,20 @@
     $('#wizard-cancel').addEventListener('click', closeWizard);
     $('#wizard-back').addEventListener('click', function () { wizardGo(-1); });
     $('#wizard-commit').addEventListener('click', function () { if (wizardStep >= 6) commitWizard(); else wizardGo(1); });
-    $('#panel-save').addEventListener('click', savePanelAddress);
+    $('#panel-save').addEventListener('click', savePanelConfig);
     $('#wz-protocol').addEventListener('change', updateWizardFields);
     $('#wz-port').addEventListener('input', updateWizardFields);
 
+    bindAuthEvents();
+    bindProcessEvents();
     bindExportEvents();
     bindMirrorEvents();
-    loadAll();
+    if (DEMO) {
+      AUTH.csrf = 'demo-csrf';
+      loadAll();
+    } else {
+      authBoot();
+    }
   }
 
   function loadAll() {
@@ -256,6 +275,7 @@
       renderRulesets();
       renderNodes();
       renderKernels();
+      renderProcesses();
       renderMirrorCard();
       renderLogs();
       renderSettings();
@@ -1149,17 +1169,284 @@
     if (!UI.panel) return;
     $('#panel-address-input').value = UI.panel.panel_address || '';
     $('#panel-version-input').value = UI.panel.version || '—';
+    var remote = UI.panel.remote_access || {};
+    var listen = String(UI.panel.listen || '127.0.0.1:18080');
+    var host = listen.slice(0, listen.lastIndexOf(':')) || '127.0.0.1';
+    var port = listen.slice(listen.lastIndexOf(':') + 1) || '18080';
+    var sel = $('#panel-listen');
+    if (sel) sel.value = stateListenIsLoopback(host) ? '127.0.0.1' : '0.0.0.0';
+    if ($('#panel-port')) $('#panel-port').value = port;
+    if ($('#trusted-proxies')) $('#trusted-proxies').value = (remote.trusted_proxies || []).join(', ');
+    var st = $('#remote-status');
+    if (st) {
+      if (remote.forced_loopback) {
+        st.textContent = '⚠ ' + (remote.warning || '配置为非回环监听，但远程访问未确认，已强制回环');
+      } else if (remote.enabled) {
+        st.textContent = '远程访问已开启（确认于 ' + (remote.acknowledged_at || '') + '）；必须使用 HTTPS/反代与强口令';
+      } else {
+        st.textContent = '当前仅回环监听。开启远程访问需要勾选风险确认并输入 ENABLE-REMOTE。';
+      }
+    }
+    var auth = UI.panel.auth || {};
+    var foot = $('#auth-foot');
+    if (foot && auth.password_storage) foot.textContent = auth.password_storage + '；Cookie ' + (auth.cookie || 'HttpOnly') + '。';
   }
-  function savePanelAddress() {
-    var v = $('#panel-address-input').value.trim();
-    api('/api/panel', { method: 'PATCH', body: JSON.stringify({ panel_address: v }) }).then(function (r) {
+  function stateListenIsLoopback(host) {
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]' || /^127\./.test(host);
+  }
+  function savePanelConfig() {
+    var listenHost = ($('#panel-listen') || {}).value || '127.0.0.1';
+    var port = ($('#panel-port') || {}).value || '18080';
+    var body = {
+      panel_address: ($('#panel-address-input') || {}).value.trim(),
+      listen: listenHost + ':' + port,
+      trusted_proxies: String(($('#trusted-proxies') || {}).value || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean)
+    };
+    var wantRemote = !stateListenIsLoopback(listenHost);
+    if (wantRemote) {
+      if (!($('#remote-ack') || {}).checked) {
+        toast('未保存', '开启远程访问前必须勾选「已阅读并确认风险」');
+        return;
+      }
+      body.remote_enabled = true;
+      body.confirm_remote = ($('#remote-confirm') || {}).value.trim();
+    } else {
+      body.remote_enabled = false;
+    }
+    api('/api/panel', { method: 'PATCH', body: JSON.stringify(body) }).then(function (r) {
       UI.panel.panel_address = r.panel_address;
-      toast('已保存对外地址', r.panel_address);
+      UI.panel.listen = r.listen;
+      UI.panel.listen_effective = r.listen_effective;
+      UI.panel.remote_access = Object.assign({}, UI.panel.remote_access || {}, r.remote_access);
+      renderSettings();
+      toast('设置已保存', r.note || '重启面板后监听变更生效');
       schedulePreview();
     }).catch(function (e) {
-      var extra = (e.fields || []).map(function (f) { return f.field + '：' + f.message; }).join('\n');
+      var extra = (e.fields || []).map(function (f) { return f.field + '：' + f.message; }).join(' · ');
       toast('保存失败', e.message + (extra ? ' · ' + extra : ''));
     });
+  }
+  function disableRemote() {
+    api('/api/panel', { method: 'PATCH', body: JSON.stringify({ remote_enabled: false, listen: '127.0.0.1:' + ((($('#panel-port') || {}).value) || '18080') }) }).then(function () {
+      toast('已关闭远程访问', '监听将在重启后回到 127.0.0.1');
+      if ($('#remote-ack')) $('#remote-ack').checked = false;
+      if ($('#remote-confirm')) $('#remote-confirm').value = '';
+      loadAll();
+    }).catch(function (e) { toast('操作失败', e.message); });
+  }
+  function changePassword() {
+    var body = {
+      current: ($('#pwd-current') || {}).value || '',
+      new: ($('#pwd-new') || {}).value || '',
+      confirm: ($('#pwd-confirm') || {}).value || ''
+    };
+    api('/api/auth/password', { method: 'POST', body: JSON.stringify(body) }).then(function () {
+      AUTH.csrf = '';
+      toast('口令已更新', '所有会话已失效，请重新登录');
+      ['#pwd-current', '#pwd-new', '#pwd-confirm'].forEach(function (s) { if ($(s)) $(s).value = ''; });
+      showAuth('login');
+    }).catch(function (e) {
+      var extra = (e.fields || []).map(function (f) { return f.field + '：' + f.message; }).join(' · ');
+      toast('更新失败', e.message + (extra ? ' · ' + extra : ''));
+    });
+  }
+
+  /* ---------------- 进程管理（M3） ---------------- */
+  var PROC_BADGE = {
+    running: ['ok', '运行中'],
+    starting: ['info', '启动中'],
+    stopping: ['muted', '停止中'],
+    stopped: ['muted', '已停止'],
+    failed: ['warn', '失败'],
+    config_invalid: ['warn', '配置校验失败'],
+    auto_restarting: ['info', '自动拉起中'],
+    demo: ['muted', '演示模式']
+  };
+  function renderProcesses() {
+    var box = $('#proc-grid');
+    if (!box || !UI.kernels) return;
+    var runtime = UI.kernels.runtime || {};
+    var demo = !!UI.kernels.demo;
+    var badge = $('#proc-demo-badge');
+    if (badge) {
+      badge.className = 'badge ' + (demo ? 'muted' : 'info') + ' plain';
+      badge.textContent = demo ? '演示模式 · 不启动真实内核' : '真实进程管理';
+    }
+    box.innerHTML = ['xray', 'sing-box', 'mihomo'].map(function (k) {
+      var r = runtime[k] || { status: 'stopped' };
+      var st = PROC_BADGE[r.status] || ['muted', r.status || '未知'];
+      var bin = r.binary || {};
+      var sha = r.config_sha256 ? r.config_sha256.slice(0, 12) + '…' : '—';
+      var portInfo = r.pid ? ('pid ' + r.pid + ' · 运行 ' + (r.uptime_secs || 0) + 's') : '无进程';
+      var alert = r.alert || r.last_error || '';
+      return '<div class="proc-row">' +
+        '<div class="proc-top"><b>' + esc(k) + '</b><span class="badge ' + st[0] + ' plain">' + esc(st[1]) + '</span>' +
+        '<span class="badge ' + (bin.present ? 'ok' : 'muted') + ' plain">' + (bin.present ? esc(bin.version || '已安装') : '未安装') + '</span>' +
+        '<span class="badge muted plain">拉起 ' + (r.restarts || 0) + '/' + (r.restart_limit || 3) + '</span>' +
+        '<span class="badge ' + (r.adopted ? 'info' : 'muted') + ' plain">' + (r.adopted ? '面板重启后接管' : '') + '</span></div>' +
+        '<div class="proc-meta">' + esc(portInfo) + ' · config sha ' + esc(sha) + ' · ' + esc(bin.path || '—') + '</div>' +
+        (alert ? '<div class="proc-alert">' + esc(alert) + '</div>' : '') +
+        '<div class="proc-actions">' +
+        '<button class="btn btn-sm" data-proc="start" data-kernel="' + esc(k) + '">启动</button>' +
+        '<button class="btn btn-soft btn-sm" data-proc="stop" data-kernel="' + esc(k) + '">停止</button>' +
+        '<button class="btn btn-soft btn-sm" data-proc="restart" data-kernel="' + esc(k) + '">重启</button>' +
+        '<button class="btn btn-soft btn-sm" data-proc="validate" data-kernel="' + esc(k) + '">校验配置</button>' +
+        '<button class="btn btn-soft btn-sm" data-proc="log" data-kernel="' + esc(k) + '">日志</button>' +
+        '</div></div>';
+    }).join('');
+    var note = $('#proc-note');
+    if (note) {
+      note.textContent = demo
+        ? '演示模式：不会 spawn 任何真实内核，启停按钮只返回 409 demo_mode。'
+        : 'state/kernels.json 记录 PID/状态；面板重启核对归属，孤儿清理；异常退出自动拉起（上限 3 次），失败回滚 last-known-good。';
+    }
+  }
+  function bindProcessEvents() {
+    var box = $('#proc-grid');
+    if (!box) return;
+    box.addEventListener('click', function (ev) {
+      var b = ev.target.closest('[data-proc]');
+      if (!b) return;
+      var k = b.dataset.kernel;
+      var act = b.dataset.proc;
+      if (DEMO) { toast('演示模式', '不会启动真实内核，也不写系统配置'); return; }
+      if (act === 'log') {
+        api('/api/kernels/' + k + '/log?tail=120').then(function (r) {
+          var lines = (r.lines || []).slice(-40).join('\n');
+          toast(k + ' 日志（末 40 行）', lines || '（日志为空）');
+        }).catch(function (e) { toast('读取日志失败', e.message); });
+        return;
+      }
+      b.disabled = true;
+      api('/api/kernels/' + k + '/' + act, { method: 'POST' }).then(function (r) {
+        if (act === 'validate') {
+          toast(k + ' 配置校验', (r.ok ? '通过' : '失败') + ' · ' + (r.output || ''));
+        } else if (act === 'start' || act === 'restart') {
+          toast(k + ' 已启动', 'pid ' + (r.pid || '?') + ' · 配置自检通过');
+        } else {
+          toast(k + ' 已停止', 'pid ' + (r.pid || '?'));
+        }
+        return refreshKernels();
+      }).catch(function (e) {
+        var fields = e.fields || [];
+        var extra = fields.map(function (f) {
+          if (f.field === 'owner') {
+            try {
+              var o = JSON.parse(f.message);
+              return '占用者 PID ' + (o.pid || '?') + ' · ' + (o.name || '未知进程');
+            } catch (x) { return f.message; }
+          }
+          return f.field + '：' + f.message;
+        }).join(' · ');
+        toast(k + ' ' + act + ' 失败', e.message + (extra ? ' · ' + extra : ''));
+        refreshKernels();
+      }).then(function () { b.disabled = false; });
+    });
+  }
+  function refreshKernels() {
+    return api('/api/kernels').then(function (r) {
+      UI.kernels = r;
+      renderKernels();
+      renderProcesses();
+      renderChrome();
+    });
+  }
+
+  /* ---------------- 鉴权（M3） ---------------- */
+  function showAuth(mode) {
+    var ov = $('#auth-overlay');
+    if (!ov) return;
+    AUTH.mode = mode;
+    ov.classList.add('open');
+    $('#auth-title').textContent = mode === 'setup' ? '首次启动 · 设置管理员口令' : '管理员登录';
+    $('#auth-sub').textContent = mode === 'setup'
+      ? '这是第一次启动。口令只保存哈希，不落明文；请使用至少 10 位、包含字母与数字的口令。'
+      : '面板默认只监听 127.0.0.1。所有写操作需要会话 + CSRF。';
+    $('#auth-confirm-field').hidden = mode !== 'setup';
+    $('#auth-submit').textContent = mode === 'setup' ? '设置口令并登录' : '登录';
+    $('#auth-msg').textContent = '';
+    $('#auth-msg').className = 'auth-msg';
+    setTimeout(function () { $('#auth-password').focus(); }, 50);
+  }
+  function hideAuth() {
+    var ov = $('#auth-overlay');
+    if (ov) ov.classList.remove('open');
+  }
+  function authReason(e) {
+    var msg = e.message || '请求失败';
+    if (e.status === 429) msg += '（已触发速率限制，请稍候再试）';
+    var fields = (e.fields || []).map(function (f) { return f.field + '：' + f.message; });
+    return msg + (fields.length ? ' · ' + fields.join(' · ') : '');
+  }
+  function authBoot() {
+    api('/api/auth/status').then(function (st) {
+      AUTH.status = st;
+      if (!st.initialized) { showAuth('setup'); return; }
+      if (!st.authenticated) { showAuth('login'); return; }
+      AUTH.csrf = st.csrf_token || '';
+      hideAuth();
+      loadAll();
+    }).catch(function (e) {
+      toast('无法获取鉴权状态', e.message);
+      showAuth('login');
+    });
+  }
+  function bindAuthEvents() {
+    var form = $('#auth-form');
+    if (!form) return;
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var mode = AUTH.mode || 'login';
+      var password = ($('#auth-password') || {}).value || '';
+      var confirm = ($('#auth-confirm') || {}).value || '';
+      var msg = $('#auth-msg');
+      var submit = $('#auth-submit');
+      submit.disabled = true;
+      var path = mode === 'setup' ? '/api/auth/setup' : '/api/auth/login';
+      var body = mode === 'setup' ? { password: password, confirm: confirm } : { password: password };
+      fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify(body) })
+        .then(function (res) {
+          return res.text().then(function (text) {
+            var data = {};
+            try { data = JSON.parse(text); } catch (e) {}
+            if (!res.ok) {
+              var err = new Error(data.error && data.error.message || ('HTTP ' + res.status));
+              err.status = res.status;
+              err.fields = data.error && data.error.fields || [];
+              throw err;
+            }
+            return data;
+          });
+        })
+        .then(function () {
+          if (mode === 'setup') {
+            return fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ password: password }) })
+              .then(function (res) { return res.json(); });
+          }
+          return null;
+        })
+        .then(function (login) {
+          if (login && login.csrf_token) AUTH.csrf = login.csrf_token;
+          msg.className = 'auth-msg auth-ok';
+          msg.textContent = mode === 'setup' ? '口令已设置，正在进入面板…' : '登录成功';
+          submit.disabled = false;
+          $('#auth-password').value = '';
+          if ($('#auth-confirm')) $('#auth-confirm').value = '';
+          api('/api/auth/status').then(function (st) {
+            AUTH.status = st;
+            AUTH.csrf = st.csrf_token || AUTH.csrf;
+            hideAuth();
+            loadAll();
+          });
+        })
+        .catch(function (e) {
+          submit.disabled = false;
+          msg.className = 'auth-msg';
+          msg.textContent = authReason(e);
+        });
+    });
+    $('#pwd-update').addEventListener('click', changePassword);
+    $('#remote-disable').addEventListener('click', disableRemote);
   }
 
   document.addEventListener('DOMContentLoaded', function () {

@@ -6,7 +6,7 @@ use std::process::Command;
 const KERNELS: [&str; 3] = ["xray", "sing-box", "mihomo"];
 
 pub struct BinaryInfo {
-    pub name: &'static str,
+    pub name: String,
     pub present: bool,
     pub path: String,
     pub version: String,
@@ -75,7 +75,7 @@ fn probe_args(name: &str) -> Vec<&'static str> {
     }
 }
 
-pub fn detect(store: &Store, name: &'static str) -> BinaryInfo {
+pub fn detect(store: &Store, name: &str) -> BinaryInfo {
     let path = find_in_path(name).or_else(|| find_in_home(store, name));
     let (present, path_str, version, sha, ok, output) = match path {
         Some(p) => {
@@ -116,7 +116,7 @@ pub fn detect(store: &Store, name: &'static str) -> BinaryInfo {
         ),
     };
     BinaryInfo {
-        name,
+        name: name.to_string(),
         present,
         path: path_str,
         version,

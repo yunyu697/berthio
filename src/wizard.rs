@@ -219,8 +219,13 @@ pub fn create_inbound(store: &Store, req: CreateInboundReq) -> ApiResult<serde_j
     } else {
         req.server_kernel
     };
-    if kernel != "xray" {
-        return Err(ApiError::bad_request("M1 入站内核仅 xray").with_field("server_kernel", "sing-box 入站规划在 M2"));
+    if !matches!(kernel.as_str(), "xray" | "sing-box") {
+        return Err(ApiError::bad_request("入站内核只支持 xray / sing-box")
+            .with_field("server_kernel", "可选 xray 或 sing-box"));
+    }
+    if kernel == "sing-box" && !kernels::detect(store, "sing-box").present {
+        return Err(ApiError::new(422, "binary_missing", "未检测到 sing-box，无法托管该入站")
+            .with_field("server_kernel", "安装 sing-box 后重试"));
     }
 
     {

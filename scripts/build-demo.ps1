@@ -1,4 +1,4 @@
-# 把运行中的 demo 服务快照成一个纯静态单文件 HTML（CSS/JS 全内联，无 CDN、无外部字体）。
+﻿# 把运行中的 demo 服务快照成一个纯静态单文件 HTML（CSS/JS 全内联，无 CDN、无外部字体）。
 # 用的是真实前端代码（web/index.html + web/app.js），只把数据换成内置假数据，不另写一套 mock。
 #
 # 用法（先启动 demo 服务）：

@@ -1,3 +1,4 @@
+mod auth;
 mod demo;
 mod error;
 mod export;
@@ -7,6 +8,7 @@ mod model;
 mod rulesets;
 mod sources;
 mod state;
+mod supervisor;
 mod util;
 mod wizard;
 
@@ -42,9 +44,25 @@ fn run_normal() {
             std::process::exit(1);
         }
     };
-    let listen = store.config.listen.clone();
+    let (listen, warning) = store.config().effective_listen();
+    if let Some(w) = warning {
+        eprintln!("[berthio] 安全提示：{w}");
+    }
+    if !state::listen_is_loopback(&listen) {
+        eprintln!("[berthio] 警告：面板监听 {listen}，将对网络开放。请确认已启用 HTTPS/反代与强口令。");
+    }
+    let auth = match auth::Auth::new(&cfg.home) {
+        Ok(a) => Arc::new(a),
+        Err(e) => {
+            eprintln!("[berthio] 鉴权初始化失败: {}", e.message);
+            std::process::exit(1);
+        }
+    };
     let store = Arc::new(store);
-    http::serve(&listen, store, false);
+    let sup = Arc::new(supervisor::Supervisor::new(&cfg.home, false));
+    sup.reconcile(&store);
+    sup.start_monitor(Arc::clone(&store));
+    http::serve(&listen, store, auth, sup, false);
 }
 
 fn run_demo() {
@@ -72,5 +90,8 @@ fn run_demo() {
     let listen = format!("127.0.0.1:{port}");
     println!("[berthio] demo 数据与状态目录: {}", home.display());
     println!("[berthio] demo 不启动真实内核、不写系统配置、不申请 root");
-    http::serve(&listen, Arc::new(store), true);
+    let auth = Arc::new(auth::Auth::demo());
+    let store = Arc::new(store);
+    let sup = Arc::new(supervisor::Supervisor::new(&home, true));
+    http::serve(&listen, store, auth, sup, true);
 }

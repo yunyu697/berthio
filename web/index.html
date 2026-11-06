@@ -1192,6 +1192,24 @@ tbody tr:hover { background: var(--surface-2); }
 #kernel-detect .kv .k{font-weight:600;flex:none}
 #kernel-detect .kv .v{color:var(--muted);text-align:right;min-width:0;word-break:break-all;white-space:pre-line}
 #kernel-detect .kv .badge{flex:none}
+.auth-overlay{position:fixed;inset:0;z-index:120;display:none;align-items:center;justify-content:center;padding:20px;background:radial-gradient(circle at 50% 20%,rgba(56,132,255,.18),rgba(12,24,34,.82))}
+.auth-overlay.open{display:flex}
+.auth-card{width:min(430px,100%);background:var(--surface);border:1px solid var(--line);border-radius:var(--r-box);box-shadow:var(--shadow);padding:22px}
+.auth-card h2{margin:0 0 4px;font-size:20px}
+.auth-card .auth-sub{color:var(--muted);font-size:var(--fs-aux);line-height:1.6;margin-bottom:14px}
+.auth-card .field{margin-bottom:10px}
+.auth-card .auth-msg{min-height:18px;font-size:var(--fs-aux);color:var(--warn);line-height:1.5}
+.auth-card .auth-ok{color:var(--ok)}
+.auth-card .btn{width:100%;margin-top:10px}
+.auth-card .auth-foot{margin-top:12px;font-size:10.5px;color:var(--muted);line-height:1.6}
+.proc-grid{display:grid;gap:10px}
+.proc-row{border:1px solid var(--line);border-radius:var(--r-box);padding:10px 12px;background:var(--surface)}
+.proc-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.proc-top b{font-size:var(--fs-block)}
+.proc-meta{margin-top:6px;font-family:var(--mono);font-size:10.5px;color:var(--muted);line-height:1.7;word-break:break-all}
+.proc-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.proc-actions .btn{font-size:11px}
+.proc-alert{margin-top:6px;padding:6px 8px;border-radius:8px;background:#fff5f5;color:#a12525;font-size:var(--fs-aux);white-space:pre-wrap}
 </style>
 </head>
 <body>
@@ -1785,6 +1803,20 @@ tbody tr:hover { background: var(--surface-2); }
           </div>
         </div>
 
+        <div class="card" id="proc-supervisor" style="margin-top:14px">
+          <div class="card-head">
+            <div><h3>进程管理 · 启动前校验 / 端口检测 / 自动拉起 / 回滚</h3><p>先跑 xray -test / sing-box check / mihomo -t，再查端口占用，最后才 spawn；异常退出限次自动拉起，失败回滚 last-known-good</p></div>
+            <div class="card-actions"><span class="badge muted plain" id="proc-demo-badge">读取中…</span></div>
+          </div>
+          <div class="card-body">
+            <div class="proc-grid" id="proc-grid"></div>
+            <div class="info-note" style="margin-top:10px">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v.1M12 11v5"></path></svg>
+              <span id="proc-note">面板重启后按 state/kernels.json 核对 PID 归属；孤儿进程会被清理，不能确认归属的进程绝不 kill。demo 模式不会启动真实内核。</span>
+            </div>
+          </div>
+        </div>
+
         <div class="info-note" style="margin-top:14px">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v.1M12 11v5"></path></svg>
           <span><b>已不适用</b>：下面是出站侧「前端 / worker」旧口径（PLAN 附录 A.1），保留仅为追溯，不作为入站设计。</span>
@@ -2103,11 +2135,11 @@ tbody tr:hover { background: var(--surface-2); }
               <h4>管理员密码</h4>
               <p>修改后所有会话立即失效，需要重新登录。</p>
               <div class="setting-form">
-                <div class="field"><label>当前密码</label><input class="input" type="password" placeholder="••••••••••"></div>
-                <div class="field"><label>新密码</label><input class="input" type="password" placeholder="至少 10 位，含大小写与符号"></div>
-                <div class="field"><label>确认新密码</label><input class="input" type="password" placeholder="再次输入"></div>
+                <div class="field"><label>当前密码</label><input class="input" id="pwd-current" type="password" placeholder="••••••••••"></div>
+                <div class="field"><label>新密码</label><input class="input" id="pwd-new" type="password" placeholder="至少 10 位，含字母与数字"></div>
+                <div class="field"><label>确认新密码</label><input class="input" id="pwd-confirm" type="password" placeholder="再次输入"></div>
               </div>
-              <div class="setting-actions"><button class="btn btn-primary" data-toast="密码已更新，所有会话已失效">更新密码</button></div>
+              <div class="setting-actions"><button class="btn btn-primary" id="pwd-update">更新密码</button></div>
             </div>
             <div class="setting-block">
               <div class="switch-row" style="padding-top:0">
@@ -2122,18 +2154,27 @@ tbody tr:hover { background: var(--surface-2); }
             <div class="card-head"><div><h3>访问与 TLS</h3><p>默认仅回环；公网必须 TLS + 强密码</p></div><div class="card-actions"><span class="badge warn plain">公网未开启</span></div></div>
             <div class="setting-block">
               <div class="form-grid">
-                <div class="field"><label>监听地址</label><select class="select"><option>127.0.0.1（默认，安全）</option><option>0.0.0.0（需确认）</option></select></div>
-                <div class="field"><label>端口</label><input class="input" value="8080" aria-label="面板端口"></div>
+                <div class="field"><label>监听地址</label><select class="select" id="panel-listen"><option value="127.0.0.1">127.0.0.1（默认，安全）</option><option value="0.0.0.0">0.0.0.0（需确认）</option></select></div>
+                <div class="field"><label>端口</label><input class="input" id="panel-port" value="18080" aria-label="面板端口"></div>
                 <div class="field"><label>TLS 模式</label><select class="select"><option>自签证书（TOFU）</option><option>ACME · HTTP-01</option><option>ACME · DNS-01</option></select></div>
                 <div class="field"><label>证书指纹</label><input class="input mono" value="SHA256 9F:2C:7A:…:B1" readonly></div>
                 <div class="field"><label>对外地址（导出 server 字段）</label><input class="input mono" id="panel-address-input" placeholder="example.com 或 1.2.3.4" aria-label="对外地址"></div>
                 <div class="field"><label>面板版本</label><input class="input mono" id="panel-version-input" value="—" readonly aria-label="面板版本"></div>
               </div>
+              <div class="form-grid" style="margin-top:10px">
+                <div class="field"><label>受信反代 IP（逗号分隔，可空）</label><input class="input mono" id="trusted-proxies" placeholder="127.0.0.1, 10.0.0.2"></div>
+                <div class="field"><label>开启远程访问确认短语</label><input class="input mono" id="remote-confirm" placeholder="ENABLE-REMOTE"></div>
+              </div>
+              <div class="switch-row" style="padding-top:8px">
+                <input type="checkbox" id="remote-ack" aria-label="确认远程访问风险">
+                <div class="switch-row-text"><b>我已阅读并确认远程访问风险</b><span>勾选 + 输入短语 ENABLE-REMOTE 才会保存为非回环监听</span></div>
+              </div>
+              <div class="auth-msg" id="remote-status" style="margin-top:8px"></div>
               <div class="info-note" style="margin-top:10px">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v.1M12 11v5"></path></svg>
                 面板不会修改宿主防火墙；开启公网后端口是否可达仍由你决定。ACME 需要 80 端口或 DNS API。
               </div>
-              <div class="setting-actions"><button class="btn" id="panel-save">保存</button><button class="btn btn-soft" id="open-public-2">开启公网</button></div>
+              <div class="setting-actions"><button class="btn" id="panel-save">保存</button><button class="btn btn-soft" id="remote-disable">关闭远程访问</button></div>
             </div>
           </div>
 
@@ -2262,6 +2303,21 @@ tbody tr:hover { background: var(--surface-2); }
       <button class="btn" id="modal-cancel">取消</button>
       <button class="btn btn-primary" id="modal-confirm">确认</button>
     </div>
+  </div>
+</div>
+
+<div class="auth-overlay" id="auth-overlay" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+  <div class="auth-card">
+    <div class="eyebrow">BERTHIO / AUTH</div>
+    <h2 id="auth-title">管理员登录</h2>
+    <p class="auth-sub" id="auth-sub">面板默认只监听 127.0.0.1。所有写操作都需要会话 + CSRF。</p>
+    <form id="auth-form" autocomplete="off">
+      <div class="field"><label for="auth-password">管理员口令</label><input class="input" id="auth-password" type="password" autocomplete="current-password" placeholder="至少 10 位，含字母与数字"></div>
+      <div class="field" id="auth-confirm-field" hidden><label for="auth-confirm">确认口令</label><input class="input" id="auth-confirm" type="password" autocomplete="new-password" placeholder="再次输入"></div>
+      <div class="auth-msg" id="auth-msg"></div>
+      <button class="btn btn-primary" id="auth-submit" type="submit">登录</button>
+    </form>
+    <div class="auth-foot" id="auth-foot">口令只以 PBKDF2-HMAC-SHA256（随机盐 + 迭代）存储，不存明文、不写日志。会话 Cookie 为 HttpOnly + SameSite=Strict。</div>
   </div>
 </div>
 

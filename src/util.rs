@@ -3,13 +3,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 当前 UTC 时间，ISO-8601（秒级，带 Z）。不引入 chrono，避免额外依赖。
-pub fn now_iso() -> String {
-    let secs = SystemTime::now()
+/// 当前 UTC 秒级时间戳。
+pub fn now_secs() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    unix_to_iso(secs)
+        .unwrap_or(0)
+}
+
+/// 当前 UTC 时间，ISO-8601（秒级，带 Z）。不引入 chrono，避免额外依赖。
+pub fn now_iso() -> String {
+    unix_to_iso(now_secs())
 }
 
 pub fn unix_to_iso(secs: u64) -> String {

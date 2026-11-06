@@ -1,10 +1,12 @@
+use crate::auth::Auth;
 use crate::error::{ApiError, ApiResult};
 use crate::export::{self, Selection};
 use crate::kernels;
 use crate::model::TokenRecord;
 use crate::rulesets;
 use crate::sources;
-use crate::state::{Config, PanelConfig, Store};
+use crate::state::{self, Config, PanelConfig, RemoteAccess, Store};
+use crate::supervisor::{self, Supervisor};
 use crate::util;
 use crate::wizard;
 use serde_json::json;
@@ -16,12 +18,94 @@ use std::time::Duration;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_BODY: usize = 2 * 1024 * 1024;
+const SESSION_COOKIE: &str = "berthio_session";
+const REMOTE_CONFIRM_PHRASE: &str = "ENABLE-REMOTE";
 
 struct Request {
     method: String,
     path: String,
     query: HashMap<String, String>,
     body: Vec<u8>,
+    headers: HashMap<String, String>,
+    peer_ip: String,
+}
+
+impl Request {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name).map(|s| s.as_str())
+    }
+
+    fn cookie(&self, name: &str) -> Option<String> {
+        let raw = self.header("cookie")?;
+        for part in raw.split(';') {
+            if let Some((k, v)) = part.split_once('=') {
+                if k.trim() == name {
+                    return Some(v.trim().to_string());
+                }
+            }
+        }
+        None
+    }
+}
+
+/// 客户端网络信息：默认只信 peer；只有 peer 属于 trusted_proxies（或显式开启）时才解析转发头。
+struct NetInfo {
+    client_ip: String,
+    https: bool,
+    behind_proxy: bool,
+}
+
+fn net_info(req: &Request, cfg: &PanelConfig) -> NetInfo {
+    let trusted_env = std::env::var("BERTHIO_TRUST_PROXY").ok().as_deref() == Some("1");
+    let trusted = trusted_env
+        || cfg
+            .remote_access
+            .trusted_proxies
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(&req.peer_ip));
+    if !trusted {
+        return NetInfo {
+            client_ip: req.peer_ip.clone(),
+            https: false,
+            behind_proxy: false,
+        };
+    }
+    let mut client_ip = req.peer_ip.clone();
+    if let Some(xff) = req.header("x-forwarded-for") {
+        let hops: Vec<&str> = xff.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        for hop in hops.iter().rev() {
+            if cfg
+                .remote_access
+                .trusted_proxies
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(hop))
+            {
+                continue;
+            }
+            client_ip = hop.to_string();
+            break;
+        }
+    }
+    let https = req
+        .header("x-forwarded-proto")
+        .map(|v| v.eq_ignore_ascii_case("https"))
+        .unwrap_or(false);
+    NetInfo {
+        client_ip,
+        https,
+        behind_proxy: true,
+    }
+}
+
+fn session_cookie(token: &str, max_age: u64, secure: bool) -> String {
+    format!(
+        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{}",
+        if secure { "; Secure" } else { "" }
+    )
+}
+
+fn clear_cookie(secure: bool) -> String {
+    format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{}", if secure { "; Secure" } else { "" })
 }
 
 struct Response {
@@ -123,7 +207,7 @@ fn parse_query(raw: &str) -> HashMap<String, String> {
     map
 }
 
-fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
+fn read_request(stream: &mut TcpStream, peer_ip: &str) -> Result<Request, String> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     loop {
@@ -137,14 +221,28 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
             let body_start = pos + 4;
             let mut content_length = 0usize;
             let mut chunked = false;
+            let mut headers: HashMap<String, String> = HashMap::new();
             for line in head.split(|b| *b == b'\n') {
                 let line = String::from_utf8_lossy(line).trim().to_string();
-                let lower = line.to_ascii_lowercase();
-                if lower.starts_with("content-length:") {
-                    content_length = lower[15..].trim().parse().unwrap_or(0);
+                if line.is_empty() {
+                    continue;
                 }
-                if lower.starts_with("transfer-encoding:") && lower.contains("chunked") {
+                let Some((k, v)) = line.split_once(':') else {
+                    continue;
+                };
+                let key = k.trim().to_ascii_lowercase();
+                let val = v.trim().to_string();
+                if key == "content-length" {
+                    content_length = val.parse().unwrap_or(0);
+                }
+                if key == "transfer-encoding" && val.to_ascii_lowercase().contains("chunked") {
                     chunked = true;
+                }
+                if let Some(existing) = headers.get_mut(&key) {
+                    existing.push_str(if key == "cookie" { "; " } else { ", " });
+                    existing.push_str(&val);
+                } else {
+                    headers.insert(key, val);
                 }
             }
             if chunked {
@@ -176,6 +274,8 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
                 path,
                 query,
                 body,
+                headers,
+                peer_ip: peer_ip.to_string(),
             });
         }
         if buf.len() > 64 * 1024 {
@@ -242,7 +342,12 @@ fn selection_from(req: &Request) -> Selection {
     }
 }
 
-pub fn serve(listen: &str, store: Arc<Store>, demo: bool) {
+pub fn serve(listen: &str, store: Arc<Store>, auth: Arc<Auth>, sup: Arc<Supervisor>, demo: bool) {
+    let cfg = store.config();
+    let (effective, warning) = cfg.effective_listen();
+    if warning.is_some() && effective != listen {
+        eprintln!("[berthio] 监听地址被安全策略覆盖：{listen} -> {effective}");
+    }
     let listener = match TcpListener::bind(listen) {
         Ok(l) => l,
         Err(e) => {
@@ -251,20 +356,27 @@ pub fn serve(listen: &str, store: Arc<Store>, demo: bool) {
         }
     };
     println!(
-        "[berthio] {}{} 已启动: http://{}  (home={})",
+        "[berthio] {}{} 已启动: http://{}  (home={}, auth={})",
         VERSION,
         if demo { " (demo)" } else { "" },
         listen,
-        store.home.display()
+        store.home.display(),
+        if demo { "demo" } else { "session+csrf" }
     );
     for stream in listener.incoming() {
         match stream {
             Ok(mut s) => {
                 let store = Arc::clone(&store);
+                let auth = Arc::clone(&auth);
+                let sup = Arc::clone(&sup);
                 std::thread::spawn(move || {
                     let _ = s.set_read_timeout(Some(Duration::from_secs(15)));
-                    let resp = match read_request(&mut s) {
-                        Ok(req) => route(&req, &store, demo),
+                    let peer_ip = s
+                        .peer_addr()
+                        .map(|a| a.ip().to_string())
+                        .unwrap_or_else(|_| "unknown".into());
+                    let resp = match read_request(&mut s, &peer_ip) {
+                        Ok(req) => route(&req, &store, &auth, &sup, demo),
                         Err(e) => Response::json(400, &json!({"error":{"code":"bad_request","message":e}})),
                     };
                     let _ = write_response(&mut s, resp);
@@ -282,15 +394,17 @@ fn write_response(stream: &mut TcpStream, resp: Response) -> std::io::Result<()>
         204 => "No Content",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
         422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
         _ => "OK",
     };
     let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\n",
         resp.status,
         reason,
         resp.content_type,
@@ -305,8 +419,30 @@ fn write_response(stream: &mut TcpStream, resp: Response) -> std::io::Result<()>
     stream.flush()
 }
 
-fn route(req: &Request, store: &Store, demo: bool) -> Response {
+fn route(req: &Request, store: &Store, auth: &Auth, sup: &Supervisor, demo: bool) -> Response {
+    let cfg = store.config();
+    let net = net_info(req, &cfg);
+    let token = req.cookie(SESSION_COOKIE);
     let path = req.path.as_str();
+    let is_public = matches!(path, "/" | "/index.html" | "/app.js" | "/favicon.ico" | "/healthz")
+        || matches!(path, "/api/auth/status" | "/api/auth/setup" | "/api/auth/login")
+        || path.starts_with("/sub/");
+    let mut actor = if demo { "demo-admin" } else { "anonymous" }.to_string();
+    if path.starts_with("/api/") && !is_public {
+        match auth.require(token.as_deref(), &net.client_ip) {
+            Ok(s) => actor = s.actor,
+            Err(e) => return Response::json(e.status, &e.to_json()),
+        }
+        if matches!(req.method.as_str(), "POST" | "PUT" | "PATCH" | "DELETE") {
+            if let Err(e) = auth.check_csrf(
+                token.as_deref().unwrap_or(""),
+                req.header("x-berthio-csrf"),
+                &net.client_ip,
+            ) {
+                return Response::json(e.status, &e.to_json());
+            }
+        }
+    }
     let result: ApiResult<Response> = match (req.method.as_str(), path) {
         ("GET", "/") | ("GET", "/index.html") => Ok(Response::html(include_str!("../web/index.html"))),
         ("GET", "/app.js") => Ok(Response::text(
@@ -316,9 +452,26 @@ fn route(req: &Request, store: &Store, demo: bool) -> Response {
         )),
         ("GET", "/favicon.ico") => Ok(Response::text(204, "image/x-icon", String::new())),
         ("GET", "/healthz") => Ok(Response::json(200, &json!({"status":"ok","version":VERSION}))),
-        ("GET", "/api/panel") => Ok(Response::json(200, &panel_payload(store, demo))),
-        ("PATCH", "/api/panel") => patch_panel(req, store),
-        ("GET", "/api/kernels") => Ok(Response::json(200, &kernels::report(store))),
+        ("GET", "/api/auth/status") => {
+            Ok(Response::json(200, &auth.status(token.as_deref(), &net.client_ip)))
+        }
+        ("POST", "/api/auth/setup") => auth_setup(req, store, auth),
+        ("POST", "/api/auth/login") => auth_login(req, store, auth, &net),
+        ("POST", "/api/auth/logout") => auth_logout(req, store, auth, token.as_deref(), &net),
+        ("POST", "/api/auth/password") => auth_password(req, store, auth, &net),
+        ("GET", "/api/panel") => Ok(Response::json(200, &panel_payload(store, auth, demo, &cfg))),
+        ("PATCH", "/api/panel") => patch_panel(req, store, &actor, &net),
+        ("GET", "/api/kernels") => Ok(Response::json(200, &kernel_payload(store, sup))),
+        ("POST", p) if p.starts_with("/api/kernels/") => kernel_action(store, sup, p),
+        ("GET", p) if p.starts_with("/api/kernels/") && p.ends_with("/log") => {
+            let name = &p["/api/kernels/".len()..p.len() - "/log".len()];
+            let tail = req
+                .query
+                .get("tail")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(120);
+            Ok(Response::json(200, &sup.log_tail(name, tail)))
+        }
         ("GET", "/api/rulesets") => Ok(Response::json(200, &rulesets_payload(store))),
         ("GET", "/api/rulesets/sources") => {
             Ok(Response::json(200, &sources::public_payload(store)))
@@ -367,53 +520,292 @@ fn route(req: &Request, store: &Store, demo: bool) -> Response {
     }
 }
 
-fn panel_payload(store: &Store, demo: bool) -> serde_json::Value {
+fn auth_setup(req: &Request, store: &Store, auth: &Auth) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    let confirm = body.get("confirm").and_then(|v| v.as_str()).unwrap_or("");
+    let out = auth.setup(password, confirm)?;
+    store.audit(
+        "auth.setup",
+        "anonymous",
+        json!({"initialized": true, "password_storage": "pbkdf2-hmac-sha256", "plaintext_logged": false}),
+    );
+    Ok(Response::json(200, &out))
+}
+
+fn auth_login(req: &Request, store: &Store, auth: &Auth, net: &NetInfo) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    if password.is_empty() {
+        return Err(ApiError::bad_request("缺少口令").with_field("password", "请输入管理员口令"));
+    }
+    match auth.login(password, &net.client_ip) {
+        Ok((payload, token, _csrf)) => {
+            store.audit(
+                "auth.login",
+                "admin",
+                json!({"ip": net.client_ip, "peer_ip": req.peer_ip, "behind_proxy": net.behind_proxy, "secure_cookie": net.https}),
+            );
+            let max_age = auth.session_ttl();
+            Ok(Response::json(200, &payload).with("Set-Cookie", session_cookie(&token, max_age, net.https)))
+        }
+        Err(e) => {
+            let event = if e.status == 429 { "auth.login.locked" } else { "auth.login.failed" };
+            store.audit(
+                event,
+                "anonymous",
+                json!({"ip": net.client_ip, "peer_ip": req.peer_ip, "code": e.code, "message": e.message}),
+            );
+            Err(e)
+        }
+    }
+}
+
+fn auth_logout(
+    req: &Request,
+    store: &Store,
+    auth: &Auth,
+    token: Option<&str>,
+    net: &NetInfo,
+) -> ApiResult<Response> {
+    let _ = req;
+    let token = token.ok_or_else(|| ApiError::new(401, "unauthenticated", "需要登录"))?;
+    let out = auth.logout(token)?;
+    store.audit("auth.logout", "admin", json!({"ip": net.client_ip}));
+    Ok(Response::json(200, &out).with("Set-Cookie", clear_cookie(net.https)))
+}
+
+fn auth_password(req: &Request, store: &Store, auth: &Auth, net: &NetInfo) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let current = body.get("current").and_then(|v| v.as_str()).unwrap_or("");
+    let new = body.get("new").and_then(|v| v.as_str()).unwrap_or("");
+    let confirm = body.get("confirm").and_then(|v| v.as_str()).unwrap_or("");
+    let out = auth.change_password(current, new, confirm, &net.client_ip)?;
+    store.audit(
+        "auth.password.changed",
+        "admin",
+        json!({"ip": net.client_ip, "sessions_revoked": out["sessions_revoked"], "plaintext_logged": false}),
+    );
+    Ok(Response::json(200, &out).with("Set-Cookie", clear_cookie(net.https)))
+}
+
+fn panel_payload(store: &Store, auth: &Auth, demo: bool, cfg: &PanelConfig) -> serde_json::Value {
     let state = store.snapshot();
     let clients: usize = state.inbounds.iter().map(|i| i.clients.len()).sum();
+    let (effective, forced) = cfg.effective_listen();
     json!({
         "version": VERSION,
         "version_source": "Cargo.toml（构建时以 CARGO_PKG_VERSION 注入，单一来源）",
-        "listen": store.config.listen,
+        "listen": cfg.listen,
+        "listen_effective": effective,
         "panel_address": state.panel.panel_address,
         "home": store.home.display().to_string(),
         "demo": demo,
         "demo_label": if demo { "演示数据" } else { "" },
         "created_at": state.panel.created_at,
         "counts": {"inbounds": state.inbounds.len(), "clients": clients},
-        "auth": {"mode":"local-admin","note":"M1 只监听本机；远程访问鉴权在 M3"}
+        "remote_access": {
+            "enabled": cfg.remote_access.enabled,
+            "acknowledged_at": cfg.remote_access.acknowledged_at,
+            "trusted_proxies": cfg.remote_access.trusted_proxies,
+            "forced_loopback": forced.is_some(),
+            "warning": forced.unwrap_or_default(),
+            "confirm_phrase_required": REMOTE_CONFIRM_PHRASE,
+            "risks": remote_risks(),
+        },
+        "auth": {
+            "mode": if demo { "demo" } else { "session" },
+            "initialized": auth.initialized(),
+            "session_ttl_seconds": auth.session_ttl(),
+            "password_storage": "PBKDF2-HMAC-SHA256（随机盐 + 迭代，只存哈希）",
+            "cookie": "HttpOnly; SameSite=Strict; 反代 https 时自动加 Secure",
+            "csrf": "所有写操作要求 X-Berthio-CSRF",
+            "forwarded_headers": "默认不信任 X-Forwarded-For / X-Forwarded-Proto；只有 peer 在 trusted_proxies 时才解析",
+        }
     })
 }
 
-fn patch_panel(req: &Request, store: &Store) -> ApiResult<Response> {
+fn remote_risks() -> Vec<&'static str> {
+    vec![
+        "远程监听会把面板暴露到网络：必须使用 HTTPS（或可信反代）与强口令",
+        "登录接口会暴露给公网，速率限制只能减缓暴力破解，不能替代网络层防护",
+        "订阅链接 /sub/<token> 一旦泄露即可被他人访问，请定期轮换",
+        "面板不会自动申请证书，也不会静默提升权限",
+    ]
+}
+
+fn patch_panel(req: &Request, store: &Store, actor: &str, net: &NetInfo) -> ApiResult<Response> {
     let body = body_json(req)?;
-    let address = body
-        .get("panel_address")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let cleaned = address
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_string();
-    if cleaned.is_empty() {
-        return Err(ApiError::bad_request("对外地址不能为空").with_field("panel_address", "填域名或公网 IP"));
+    let mut panel: PanelConfig = store.config();
+    let mut changed = false;
+    if let Some(address) = body.get("panel_address").and_then(|v| v.as_str()) {
+        let cleaned = address
+            .trim()
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string();
+        if cleaned.is_empty() {
+            return Err(ApiError::bad_request("对外地址不能为空")
+                .with_field("panel_address", "填域名或公网 IP"));
+        }
+        if cleaned.contains(char::is_whitespace) || cleaned.contains('/') {
+            return Err(ApiError::bad_request("对外地址只能是域名或 IP（可带端口）")
+                .with_field("panel_address", "不要带路径或空格"));
+        }
+        panel.panel_address = cleaned.clone();
+        store.update(|state| {
+            state.panel.panel_address = cleaned;
+            Ok(())
+        })?;
+        changed = true;
     }
-    if cleaned.contains(char::is_whitespace) || cleaned.contains('/') {
-        return Err(ApiError::bad_request("对外地址只能是域名或 IP（可带端口）")
-            .with_field("panel_address", "不要带路径或空格"));
+    let mut listen_changed = false;
+    if let Some(listen) = body.get("listen").and_then(|v| v.as_str()) {
+        let listen = listen.trim();
+        let (_, port) = listen
+            .rsplit_once(':')
+            .ok_or_else(|| ApiError::bad_request("监听地址格式必须是 host:port")
+                .with_field("listen", "例如 127.0.0.1:18080"))?;
+        if port.parse::<u16>().map(|p| p == 0).unwrap_or(true) {
+            return Err(ApiError::bad_request("监听端口不合法").with_field("listen", "1–65535"));
+        }
+        if listen != panel.listen {
+            panel.listen = listen.to_string();
+            listen_changed = true;
+            changed = true;
+        }
     }
-    let mut panel: PanelConfig = store.config.clone();
-    panel.panel_address = cleaned.clone();
-    let cfg = Config { home: store.home.clone() };
-    cfg.save_panel(&panel)?;
-    store.update(|state| {
-        state.panel.panel_address = cleaned.clone();
-        Ok(())
-    })?;
-    store.audit("panel.address.updated", "local-admin", json!({"panel_address": cleaned}));
-    Ok(Response::json(200, &json!({"ok":true,"panel_address":cleaned})))
+    let remote_enabled = body.get("remote_enabled").and_then(|v| v.as_bool());
+    if let Some(enable) = remote_enabled {
+        if enable {
+            let confirm = body
+                .get("confirm_remote")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if confirm != REMOTE_CONFIRM_PHRASE {
+                let mut err = ApiError::bad_request("开启远程访问需要二次确认")
+                    .with_field("confirm_remote", format!("请显式提交 confirm_remote={REMOTE_CONFIRM_PHRASE}"))
+                    .with_field("acknowledge", "确认已知晓以下风险后重试");
+                for r in remote_risks() {
+                    err = err.with_field("risk", r);
+                }
+                return Err(err);
+            }
+            if !panel.remote_access.enabled {
+                panel.remote_access = RemoteAccess {
+                    enabled: true,
+                    acknowledged_at: util::now_iso(),
+                    acknowledged_by: actor.to_string(),
+                    trusted_proxies: panel.remote_access.trusted_proxies.clone(),
+                };
+            }
+        } else {
+            panel.remote_access.enabled = false;
+            panel.remote_access.acknowledged_at.clear();
+            panel.remote_access.acknowledged_by.clear();
+        }
+        changed = true;
+    }
+    if let Some(proxies) = body.get("trusted_proxies").and_then(|v| v.as_array()) {
+        let mut list = Vec::new();
+        for p in proxies {
+            let Some(s) = p.as_str() else { continue };
+            let s = s.trim();
+            if s.is_empty() {
+                continue;
+            }
+            if s.contains(char::is_whitespace) || !(s.contains('.') || s.contains(':')) {
+                return Err(ApiError::bad_request("trusted_proxies 只能填 IP")
+                    .with_field("trusted_proxies", format!("非法条目: {s}")));
+            }
+            list.push(s.to_string());
+        }
+        panel.remote_access.trusted_proxies = list;
+        changed = true;
+    }
+    if !panel.remote_access.enabled && !state::listen_is_loopback(&panel.listen) {
+        let mut err = ApiError::bad_request("监听非回环地址必须先确认开启远程访问")
+            .with_field("listen", panel.listen.clone())
+            .with_field("action", format!("同时提交 remote_enabled=true 与 confirm_remote={REMOTE_CONFIRM_PHRASE}"));
+        for r in remote_risks() {
+            err = err.with_field("risk", r);
+        }
+        return Err(err);
+    }
+    if changed {
+        let cfg = Config { home: store.home.clone() };
+        cfg.save_panel(&panel)?;
+        store.set_config(panel.clone());
+        store.audit(
+            "panel.config.updated",
+            actor,
+            json!({
+                "listen": panel.listen,
+                "remote_enabled": panel.remote_access.enabled,
+                "trusted_proxies": panel.remote_access.trusted_proxies,
+                "ip": net.client_ip,
+                "peer_ip": req.peer_ip,
+            }),
+        );
+    }
+    let (effective, forced) = panel.effective_listen();
+    Ok(Response::json(
+        200,
+        &json!({
+            "ok": true,
+            "panel_address": panel.panel_address,
+            "listen": panel.listen,
+            "listen_effective": effective,
+            "restart_required": listen_changed || changed,
+            "remote_access": {
+                "enabled": panel.remote_access.enabled,
+                "acknowledged_at": panel.remote_access.acknowledged_at,
+                "trusted_proxies": panel.remote_access.trusted_proxies,
+                "warning": forced.unwrap_or_default(),
+            },
+            "note": "监听/远程开关变更需重启面板进程后生效；当前连接不受影响",
+        }),
+    ))
+}
+
+fn kernel_payload(store: &Store, sup: &Supervisor) -> serde_json::Value {
+    let mut base = kernels::report(store);
+    base["runtime"] = sup.runtime_json(store);
+    base["demo"] = json!(sup.is_demo());
+    base["supervisor"] = json!({
+        "check_commands": {
+            "xray": "xray -test -config <config>",
+            "sing-box": "sing-box check -c <config>",
+            "mihomo": "mihomo -t -f <config>"
+        },
+        "start_rule": "先配置自检 → 再端口占用检测 → 才 spawn；失败回滚 last-known-good",
+        "ports": "启动前逐个 bind 检测；冲突时通过 netstat/ss 找占用者 PID 与进程名",
+        "persistence": "state/kernels.json 记录 PID/状态；面板重启核对归属，孤儿清理",
+        "auto_restart": "异常退出自动拉起，默认上限 3 次，超限停止并写审计告警",
+        "logs": "logs/kernels/<kernel>.log，启动时按 BERTHIO_KERNEL_LOG_MAX（默认 5 MB）轮转，保留 3 份",
+        "privilege": "需要 root/特权端口的动作只列出操作并拒绝，不静默提权",
+        "demo": "demo 模式绝不 spawn 真实内核",
+    });
+    base
+}
+
+fn kernel_action(store: &Store, sup: &Supervisor, path: &str) -> ApiResult<Response> {
+    let rest = &path["/api/kernels/".len()..];
+    let (kernel, action) = rest
+        .split_once('/')
+        .ok_or_else(|| ApiError::not_found(format!("未知内核接口 {path}")))?;
+    if !supervisor::is_kernel(kernel) {
+        return Err(ApiError::not_found(format!("未知内核 {kernel}")));
+    }
+    let out = match action {
+        "start" => sup.start(store, kernel)?,
+        "stop" => sup.stop(kernel)?,
+        "restart" => sup.restart(store, kernel)?,
+        "validate" => sup.validate(store, kernel)?,
+        _ => return Err(ApiError::not_found(format!("未知动作 {action}"))),
+    };
+    Ok(Response::json(200, &out))
 }
 
 fn inbound_list(store: &Store) -> serde_json::Value {

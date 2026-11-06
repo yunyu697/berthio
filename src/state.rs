@@ -8,6 +8,18 @@ use std::sync::Mutex;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:18080";
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoteAccess {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub acknowledged_at: String,
+    #[serde(default)]
+    pub acknowledged_by: String,
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PanelConfig {
     #[serde(default = "default_schema")]
@@ -19,6 +31,9 @@ pub struct PanelConfig {
     pub panel_address: String,
     #[serde(default)]
     pub log_keep_days: u32,
+    /// 远程监听必须显式确认；未确认时强制回环。
+    #[serde(default)]
+    pub remote_access: RemoteAccess,
 }
 
 fn default_schema() -> u32 {
@@ -35,7 +50,34 @@ impl Default for PanelConfig {
             listen: DEFAULT_LISTEN.to_string(),
             panel_address: String::new(),
             log_keep_days: 14,
+            remote_access: RemoteAccess::default(),
         }
+    }
+}
+
+pub fn listen_is_loopback(listen: &str) -> bool {
+    let host = listen.rsplit_once(':').map(|(h, _)| h).unwrap_or(listen);
+    host.starts_with("127.") || host == "::1" || host == "localhost" || host == "[::1]"
+}
+
+impl PanelConfig {
+    /// 实际生效的监听地址：未确认远程访问时强制回环。
+    pub fn effective_listen(&self) -> (String, Option<String>) {
+        if listen_is_loopback(&self.listen) || self.remote_access.enabled {
+            return (self.listen.clone(), None);
+        }
+        let port = self
+            .listen
+            .rsplit_once(':')
+            .map(|(_, p)| p.to_string())
+            .unwrap_or_else(|| "18080".to_string());
+        (
+            format!("127.0.0.1:{port}"),
+            Some(format!(
+                "配置的监听地址 {} 属于非回环地址，但远程访问未确认；本次强制绑定 127.0.0.1:{port}",
+                self.listen
+            )),
+        )
     }
 }
 
@@ -68,6 +110,8 @@ impl Config {
             "config",
             "state",
             "logs/audit",
+            "logs/kernels",
+            "state/kernels",
             "configs/generated",
             "data/rulesets",
             "data/geo",
@@ -115,7 +159,7 @@ impl Config {
 
 pub struct Store {
     pub home: PathBuf,
-    pub config: PanelConfig,
+    config: Mutex<PanelConfig>,
     inner: Mutex<State>,
 }
 
@@ -140,11 +184,19 @@ impl Store {
         }
         let store = Self {
             home: cfg.home.clone(),
-            config: panel,
+            config: Mutex::new(panel),
             inner: Mutex::new(state),
         };
         store.persist(&store.inner.lock().unwrap())?;
         Ok(store)
+    }
+
+    pub fn config(&self) -> PanelConfig {
+        self.config.lock().unwrap().clone()
+    }
+
+    pub fn set_config(&self, panel: PanelConfig) {
+        *self.config.lock().unwrap() = panel;
     }
 
     pub fn snapshot(&self) -> State {
