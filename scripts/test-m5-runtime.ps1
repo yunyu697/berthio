@@ -10,6 +10,7 @@ param(
   [int]$Port = 18193
 )
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion.Major -lt 6) {
   $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
   if ($pwsh) {
@@ -26,7 +27,7 @@ $KernelDir = Join-Path $root ".tools\kernel"
 if (-not (Test-Path (Join-Path $KernelDir "mihomo"))) { throw "缺少 $KernelDir\mihomo，无法验证 L2" }
 
 $Base = "http://127.0.0.1:$Port"
-$bh = Join-Path $env:TEMP ("berthio-m5-rt-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+$bh = Join-Path (Join-Path $root "tmp") ("berthio-m5-rt-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 $Password = "Berthio#2026"
 New-Item -ItemType Directory -Force -Path $bh | Out-Null
 

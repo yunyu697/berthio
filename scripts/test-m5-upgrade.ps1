@@ -9,6 +9,7 @@ param(
   [int]$Port = 18190
 )
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion.Major -lt 6) {
   $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
   if ($pwsh) {
@@ -23,7 +24,7 @@ if (-not $Exe) { $Exe = Join-Path $root "target\debug\berthio.exe" }
 if (-not (Test-Path $Exe)) { throw "找不到 $Exe，先 cargo build" }
 
 $Base = "http://127.0.0.1:$Port"
-$bh = Join-Path $env:TEMP ("berthio-m5-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+$bh = Join-Path (Join-Path $root "tmp") ("berthio-m5-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 $Password = "Berthio#2026"
 New-Item -ItemType Directory -Force -Path (Join-Path $bh "config"), (Join-Path $bh "state"), (Join-Path $bh "logs/audit") | Out-Null
 

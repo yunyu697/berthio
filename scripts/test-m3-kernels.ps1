@@ -10,6 +10,8 @@ param(
   [int]$InboundPort = 29501
 )
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot "lib\path-guard.ps1")
 # 脚本使用 -SkipHttpErrorCheck，需要 PowerShell 7+；5.1 下自动用 pwsh 重新执行。
 if ($PSVersionTable.PSVersion.Major -lt 6) {
   $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
@@ -20,6 +22,8 @@ if ($PSVersionTable.PSVersion.Major -lt 6) {
   throw "需要 PowerShell 7+（pwsh）"
 }
 $script:fail = 0
+$script:panel = $null
+$script:sess = $null
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $Exe) { $Exe = Join-Path $root "target\debug\berthio.exe" }
 if (-not $KernelDir) { $KernelDir = Join-Path $root ".tools\kernel" }
@@ -27,7 +31,7 @@ if (-not (Test-Path $Exe)) { throw "找不到 $Exe，先 cargo build" }
 if (-not (Test-Path $KernelDir)) { throw "找不到内核目录 $KernelDir" }
 
 $Base = "http://127.0.0.1:$Port"
-$bh = Join-Path $env:TEMP ("berthio-m3-kern-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+$bh = Join-Path (Join-Path $root "tmp") ("berthio-m3-kern-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $bh | Out-Null
 $Password = "Berthio#2026"
 
@@ -183,7 +187,7 @@ try {
   # 7) 孤儿清理：状态文件丢失后，面板应清理本面板配置残留的进程
   Stop-Process -Id $panel.Id -Force
   Start-Sleep -Seconds 1
-  Remove-Item (Join-Path $bh "state\kernels.json") -Force
+  Remove-GuardedPath -Path (Join-Path $bh "state\kernels.json") -AllowedRoot $bh -Apply
   $panel = Start-Panel
   $csrf = Login
   Start-Sleep -Seconds 2
@@ -219,7 +223,7 @@ try {
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   $env:BERTHIO_HOME = $null; $env:BERTHIO_LISTEN = $null
   $env:BERTHIO_KERNEL_DIR = $null; $env:BERTHIO_KERNEL_LOG_MAX = $null
-  Remove-Item -Recurse -Force $bh -ErrorAction SilentlyContinue
+  Remove-GuardedPath -Path $bh -AllowedRoot (Join-Path $root "tmp") -Apply -ErrorAction SilentlyContinue | Out-Null
 }
 
 Write-Host ""

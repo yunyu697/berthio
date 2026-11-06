@@ -8,6 +8,7 @@ param(
   [string]$BaseUrl = "http://127.0.0.1:18090"
 )
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 $script:fail = 0
 
 function Post-Json([string]$path, $obj) {

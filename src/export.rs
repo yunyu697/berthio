@@ -605,7 +605,9 @@ fn run_binary_check(store: &Store, format: &str, rid: &str, ext: &str, content: 
         ("mihomo", vec!["-t".to_string(), "-f".to_string(), path.display().to_string()])
     };
     let output = Command::new(&info.path).args(&args).output();
-    let _ = std::fs::remove_file(&path);
+    if let Some(parent) = path.parent() {
+        let _ = crate::safety::remove_file(&path, &[parent.to_path_buf()]);
+    }
     match output {
         Ok(o) => {
             let text = format!(

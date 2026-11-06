@@ -7,6 +7,7 @@ mod kernels;
 mod migrate;
 mod model;
 mod rulesets;
+mod safety;
 mod sources;
 mod state;
 mod supervisor;
@@ -71,8 +72,9 @@ fn run_normal() {
 }
 
 fn run_demo() {
-    let home = std::env::temp_dir().join(format!("berthio-demo-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
+    let temp_root = std::env::temp_dir();
+    let home = temp_root.join(format!("berthio-demo-{}", std::process::id()));
+    let _ = safety::remove_dir_all(&home, &[temp_root]);
     state::init_home(&home);
     // 演示模式固定本机回环，不接受外部连接。
     std::env::set_var("BERTHIO_HOME", &home);

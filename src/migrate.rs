@@ -1245,7 +1245,7 @@ fn build_plan_db(store: &Store, db_path: &str) -> ApiResult<Plan> {
     let snapshot = take_snapshot(store, &canonical)?;
     let read = read_snapshot(&snapshot.path);
     // 快照里是整库副本（含私钥），读完立即删除，不留在 tmp/。
-    let _ = fs::remove_dir_all(&snapshot.work);
+    let _ = crate::safety::remove_dir_all(&snapshot.work, &[store.home_path("tmp")]);
     let (schema, rows, traffic) = read?;
 
     let source_prefix =

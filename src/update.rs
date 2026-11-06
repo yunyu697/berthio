@@ -634,7 +634,7 @@ fn cleanup_parts(home: &Path) {
             let path = entry.path();
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.ends_with(".part") || name.ends_with(".tmp") {
-                let _ = fs::remove_file(path);
+                let _ = crate::safety::remove_file(&path, &[dir.clone()]);
             }
         }
     }
@@ -655,7 +655,7 @@ fn cleanup_old_exe() {
     for entry in entries.flatten() {
         let fname = entry.file_name().to_string_lossy().to_string();
         if fname.starts_with(&prefix) {
-            let _ = fs::remove_file(entry.path());
+            let _ = crate::safety::remove_file(&entry.path(), &[dir.to_path_buf()]);
         }
     }
 }

@@ -25,17 +25,19 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot "lib\path-guard.ps1")
 $Repo = Split-Path -Parent $PSScriptRoot
 if (-not $Bin) { $Bin = Join-Path $Repo "target\debug\berthio.exe" }
 if (-not (Test-Path $Bin)) { throw "找不到 $Bin，请先 cargo build" }
-if (-not $Work) { $Work = Join-Path $env:TEMP "berthio-update-test" }
+if (-not $Work) { $Work = Join-Path $Repo "tmp\berthio-update-test" }
 $Work = (New-Item -ItemType Directory -Force -Path $Work).FullName
 $HomeDir = Join-Path $Work "home"
 $Downloads = Join-Path $Work "downloads"
 $FeedRoot = Join-Path $Work "feed"
 $OutDir = Join-Path $Work "out"
 foreach ($d in @($HomeDir, $Downloads, $FeedRoot, $OutDir)) {
-  if (Test-Path $d) { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
+  if (Test-Path -LiteralPath $d) { Remove-GuardedPath -Path $d -AllowedRoot $Work -Apply -ErrorAction SilentlyContinue }
   New-Item -ItemType Directory -Force -Path $d | Out-Null
 }
 $Base = "http://127.0.0.1:$Port"
@@ -140,7 +142,7 @@ function Part-Files {
 }
 
 # ---------------------------------------------------------------- 准备
-Copy-Item (Join-Path $Fixture $AssetName) (Join-Path $FeedRoot "bin-ok.exe") -Force
+Copy-GuardedItem -Path (Join-Path $Fixture $AssetName) -Destination (Join-Path $FeedRoot "bin-ok.exe") -AllowedRoot $Work -Apply | Out-Null
 $pubkey = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $Fixture "test-pubkey.txt")))
 $cfg = @{
   listen = "127.0.0.1:$Port"
@@ -233,7 +235,7 @@ try {
 
   # 7) 无头 UI：两按钮 / 已最新无按钮 / 仅下载变安装 / 镜像失败逐条展示
   if (-not $SkipUi) {
-    if (-not $UiScript) { $UiScript = Join-Path $env:TEMP "berthio-update-ui\check.mjs" }
+    if (-not $UiScript) { $UiScript = Join-Path $Repo "tmp\berthio-update-ui\check.mjs" }
     if (-not (Test-Path $UiScript)) {
       Write-Host "SKIP  无头 UI 脚本不存在：$UiScript（用 -UiScript 指定）"
     } else {
@@ -242,14 +244,14 @@ try {
       else {
         # UI 从「未下载」起步：清掉上一段产生的 saved 记录并重启
         Stop-Panel $panel
-        Remove-Item (Join-Path $HomeDir "state\update.json") -Force -ErrorAction SilentlyContinue
+        Remove-GuardedPath -Path (Join-Path $HomeDir "state\update.json") -AllowedRoot $HomeDir -Apply -ErrorAction SilentlyContinue | Out-Null
         $panel = Start-Panel $Bin $HomeDir
         Check (Wait-Health) "UI 前重启（清空已下载记录）"
         $auth = Login
         Write-Manifest "1.0.1" "ok" "asset.sig" 16384
-        Copy-Item (Join-Path $FeedRoot "latest.json") (Join-Path $FeedRoot "ui-new.json") -Force
+        Copy-GuardedItem -Path (Join-Path $FeedRoot "latest.json") -Destination (Join-Path $FeedRoot "ui-new.json") -AllowedRoot $Work -Apply | Out-Null
         Write-Manifest "1.0.0" "ok" "asset.sig" 16384
-        Copy-Item (Join-Path $FeedRoot "latest.json") (Join-Path $FeedRoot "ui-latest.json") -Force
+        Copy-GuardedItem -Path (Join-Path $FeedRoot "latest.json") -Destination (Join-Path $FeedRoot "ui-latest.json") -AllowedRoot $Work -Apply | Out-Null
         Write-Manifest "1.0.1" "ok" "asset.sig" 16384
         & node $UiScript $Base $FeedRoot $OutDir $Password
         if ($LASTEXITCODE -ne 0) { $script:fail++ }
@@ -265,11 +267,11 @@ try {
     $installHome = Join-Path $Work "install-home"
     New-Item -ItemType Directory -Force -Path $installDir, (Join-Path $installHome "config") | Out-Null
     $copy = Join-Path $installDir $(Split-Path -Leaf $Bin)
-    Copy-Item $Bin $copy -Force
-    Copy-Item $Bin (Join-Path $FeedRoot "bin.exe") -Force
+    Copy-GuardedItem -Path $Bin -Destination $copy -AllowedRoot $Work -Apply | Out-Null
+    Copy-GuardedItem -Path $Bin -Destination (Join-Path $FeedRoot "bin.exe") -AllowedRoot $Work -Apply | Out-Null
     $sigOut = Join-Path $Work "install.sig"
     & $SignTool sign $SignKey (Join-Path $FeedRoot "bin.exe") "1.0.1" $AssetName $sigOut | Out-Null
-    Copy-Item $sigOut (Join-Path $FeedRoot "install.sig") -Force
+    Copy-GuardedItem -Path $sigOut -Destination (Join-Path $FeedRoot "install.sig") -AllowedRoot $Work -Apply | Out-Null
     Write-Manifest "1.0.1" "exe" "install.sig" (Get-Item (Join-Path $FeedRoot "bin.exe")).Length
 
     $cfg2 = @{

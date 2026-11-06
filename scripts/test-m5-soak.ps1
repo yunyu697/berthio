@@ -13,6 +13,7 @@ param(
   [string]$OutDir = ""
 )
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion.Major -lt 6) {
   $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
   if ($pwsh) {
@@ -31,7 +32,7 @@ if (-not (Test-Path (Join-Path $KernelDir "xray"))) { throw "缺少 $KernelDir\x
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $Base = "http://127.0.0.1:$Port"
-$bh = Join-Path $env:TEMP ("berthio-m5-soak-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+$bh = Join-Path (Join-Path $root "tmp") ("berthio-m5-soak-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $bh | Out-Null
 $Password = "Berthio#2026"
 $LogMax = 1048576

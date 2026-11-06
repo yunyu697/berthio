@@ -9,6 +9,7 @@ param(
   [string]$KernelDir = ""
 )
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion.Major -lt 6) {
   $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
   if ($pwsh) {
@@ -18,6 +19,7 @@ if ($PSVersionTable.PSVersion.Major -lt 6) {
   throw "需要 PowerShell 7+（pwsh）"
 }
 $script:fail = 0
+$script:panel = $null
 $root = Split-Path -Parent $PSScriptRoot
 if (-not $Exe) { $Exe = Join-Path $root "target\debug\berthio.exe" }
 if (-not (Test-Path $Exe)) { throw "找不到 $Exe，先 cargo build" }
@@ -27,7 +29,7 @@ $SingBox = Join-Path $KernelDir "sing-box\1.14.4\sing-box.exe"
 $Xray = Join-Path $KernelDir "xray\25.6.8\xray.exe"
 
 $Base = "http://127.0.0.1:$Port"
-$bh = Join-Path $env:TEMP ("berthio-m4-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+$bh = Join-Path (Join-Path $root "tmp") ("berthio-m4-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $bh | Out-Null
 $fixtures = Join-Path $bh "fixtures"
 $Password = "Berthio#2026"

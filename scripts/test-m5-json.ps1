@@ -11,6 +11,7 @@ param(
   [string]$Fixture = ""
 )
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion.Major -lt 6) {
   $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
   if ($pwsh) {
@@ -27,7 +28,7 @@ if (-not $Fixture) { $Fixture = Join-Path $PSScriptRoot "fixtures\3xui-v3-export
 if (-not (Test-Path $Fixture)) { throw "找不到样本 $Fixture" }
 
 $Base = "http://127.0.0.1:$Port"
-$bh = Join-Path $env:TEMP ("berthio-m5-json-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+$bh = Join-Path (Join-Path $root "tmp") ("berthio-m5-json-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 $Password = "Berthio#2026"
 $SecretKey = "wCmzHKJR4pef2-B7uIv60Myqv1q-1RF74KZBwDYZaFU"
 New-Item -ItemType Directory -Force -Path $bh | Out-Null

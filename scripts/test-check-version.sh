@@ -4,8 +4,10 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT/scripts/check-version.sh"
+. "$ROOT/scripts/lib/path-guard.sh"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+TMP_ROOT="$(dirname "$TMP")"
+trap 'guard_rm_rf "$TMP" "$TMP_ROOT" --apply' EXIT
 
 pass_n=0
 fail_n=0

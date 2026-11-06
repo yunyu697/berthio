@@ -5,13 +5,16 @@ SRC=/data/x-ui.db
 H=/work/home
 JAR=/tmp/cookies.txt
 BASE=http://127.0.0.1:18080
+# shellcheck source=../lib/path-guard.sh
+. "$(dirname "$0")/../lib/path-guard.sh"
 
 fail=0
 say() { echo "$1"; }
 ck() { if [ "$1" = "1" ]; then say "PASS  $2  ${3:-}"; else say "FAIL  $2  ${3:-}"; fail=$((fail+1)); fi; }
 
 mkdir -p "$H" /tmp
-find "$H" -mindepth 1 -maxdepth 2 -exec rm -rf {} + 2>/dev/null || true
+guard_rm_rf "$H" /work --apply
+mkdir -p "$H"
 berthio --version
 
 before=$(sha256sum "$SRC" | cut -d' ' -f1)

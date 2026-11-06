@@ -8,6 +8,8 @@ param(
   [int]$Port = 18183
 )
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot "lib\path-guard.ps1")
 # 脚本使用 -SkipHttpErrorCheck，需要 PowerShell 7+；5.1 下自动用 pwsh 重新执行。
 if ($PSVersionTable.PSVersion.Major -lt 6) {
   $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
@@ -18,12 +20,14 @@ if ($PSVersionTable.PSVersion.Major -lt 6) {
   throw "需要 PowerShell 7+（pwsh）"
 }
 $script:fail = 0
+$script:panel = $null
 $root = Split-Path -Parent $PSScriptRoot
+$tmpRoot = Join-Path $root "tmp"
 if (-not $Exe) { $Exe = Join-Path $root "target\debug\berthio.exe" }
 if (-not (Test-Path $Exe)) { throw "找不到 $Exe，先 cargo build" }
 
 $Base = "http://127.0.0.1:$Port"
-$bh = Join-Path $env:TEMP ("berthio-m3-auth-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+$bh = Join-Path $tmpRoot ("berthio-m3-auth-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $bh | Out-Null
 $Password = "Berthio#2026"
 
@@ -176,7 +180,7 @@ try {
   if ($script:panel) { Stop-Process -Id $script:panel.Id -Force -ErrorAction SilentlyContinue }
   $env:BERTHIO_HOME = $null; $env:BERTHIO_LISTEN = $null
   $env:BERTHIO_SESSION_TTL_SECS = $null; $env:BERTHIO_LOGIN_MAX_FAILS = $null; $env:BERTHIO_LOGIN_LOCK_SECS = $null
-  Remove-Item -Recurse -Force $bh -ErrorAction SilentlyContinue
+  Remove-GuardedPath -Path $bh -AllowedRoot $tmpRoot -Apply -ErrorAction SilentlyContinue | Out-Null
 }
 
 Write-Host ""
