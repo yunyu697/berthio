@@ -123,7 +123,7 @@ Linux 发布二进制以 Debian 12（glibc 2.36）为基线构建，更老的发
 | `state/kernels/<内核>.lkg` | 各内核最近一次通过校验的配置（last known good） |
 | `state/update.json` | 自更新状态：已下载包记录、最近一次安装记录 |
 | `state/update/<可执行文件>.prev` | 自更新替换前的可执行文件备份 |
-| `state/backups/` | schema 升级前的逐字节备份 |
+| `state/backups/` | schema 升级前的逐字节备份；手动备份为 `state/backups/<name>/`（`manifest.json` + `files/`） |
 | `configs/generated/` | 生成的代理配置 |
 | `logs/audit/`、`logs/kernels/` | 审计日志与内核日志（按月/按内核轮转） |
 | `data/rulesets/`、`data/geo/` | 规则集与地理数据 |
@@ -133,6 +133,8 @@ Linux 发布二进制以 Debian 12（glibc 2.36）为基线构建，更老的发
 「仅下载」的安装包落在用户默认下载目录（Windows 为 `%USERPROFILE%\Downloads`，Linux 为 `~/Downloads`），并在旁边写出同名 `.sig` 签名文件。
 
 `panel.json` / `state.json` 在版本升级时自动迁移并先写备份；迁移失败会回滚并拒绝启动，`schema_version` 高于当前程序版本时拒绝启动且不改写文件。
+
+手动备份包含 `config/panel.json`、`config/sources.json`、`state/state.json`、`state/auth.json` 以及相对路径配置的内置 TLS 证书/私钥；审计日志、内核 PID、升级进度与可再生缓存不参与备份（设置页会逐项列出包含与排除理由）。恢复前核对每个文件的 SHA-256，校验失败不改动现场；通过后先拍回滚快照，再逐文件原子替换，写入失败自动回滚。
 
 ## 版本号规则
 

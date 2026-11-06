@@ -2266,23 +2266,24 @@ tbody tr:hover { background: var(--surface-2); }
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v.1M12 11v5"></path></svg>
                 面板不会修改宿主防火墙；开启公网后端口是否可达仍由你决定。TLS 证书/私钥/策略变更需重启进程生效。
               </div>
-              <div class="setting-actions"><button class="btn" id="panel-save">保存</button><button class="btn btn-soft" id="tls-generate">生成自签证书</button><button class="btn btn-soft" id="remote-disable">关闭远程访问</button></div>
+              <div class="setting-actions"><button class="btn" id="panel-save">保存</button><button class="btn btn-soft" id="tls-generate">生成自签证书</button><button class="btn btn-soft btn-danger" id="tls-delete">删除证书</button><button class="btn btn-soft" id="remote-disable">关闭远程访问</button></div>
             </div>
           </div>
 
           <div class="card">
             <div class="card-head"><div><h3>数据目录与备份</h3><p>单一可写根，卸载默认保留</p></div><div class="card-actions"><span class="badge ok plain">合规</span></div></div>
             <div class="setting-block">
-              <div class="kv"><span class="k">数据根目录</span><span class="v">/opt/berthio/</span></div>
-              <div class="kv"><span class="k">内核目录</span><span class="v">/opt/berthio/runtime/kernels/</span></div>
-              <div class="kv"><span class="k">配置与快照</span><span class="v">/opt/berthio/configs/</span></div>
-              <div class="kv"><span class="k">密钥与状态</span><span class="v">/opt/berthio/state/ · 0600</span></div>
+              <div class="kv"><span class="k">数据根目录</span><span class="v mono" id="backup-home">—</span></div>
+              <div class="kv"><span class="k">内核目录</span><span class="v">runtime/kernels/</span></div>
+              <div class="kv"><span class="k">配置与快照</span><span class="v">configs/</span></div>
+              <div class="kv"><span class="k">密钥与状态</span><span class="v">state/ · 0600</span></div>
               <div class="kv"><span class="k">保留版本</span><span class="v plain">最近 2 个 · 用户自备内核不清理</span></div>
               <div class="setting-actions">
-                <button class="btn" data-toast="备份已开始（示例）">立即备份</button>
-                <button class="btn" data-toast="请选择备份文件（示例）">恢复</button>
-                <button class="btn" data-toast="已重新计算目录权限（示例）">校验权限</button>
+                <button class="btn" id="backup-create">立即备份</button>
+                <button class="btn btn-soft" id="backup-refresh">刷新清单</button>
               </div>
+              <div class="auth-msg mono" id="backup-plan" style="margin-top:8px">加载备份清单…</div>
+              <div id="backup-list" style="margin-top:8px"></div>
             </div>
             <div class="setting-block">
               <h4>日志保留</h4>

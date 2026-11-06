@@ -1,4 +1,5 @@
 mod auth;
+mod backup;
 #[cfg(test)]
 mod capability;
 mod demo;

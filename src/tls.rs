@@ -249,6 +249,12 @@ pub fn inspect(der: &[u8]) -> Option<CertInfo> {
     })
 }
 
+/// 从 PEM 文本里取第一张证书并解析（删除前记录指纹/到期用）。
+pub fn inspect_pem(text: &str) -> Option<CertInfo> {
+    let der = pem_blocks(text, "CERTIFICATE").into_iter().next()?;
+    inspect(&der)
+}
+
 fn pem_blocks(text: &str, label: &str) -> Vec<Vec<u8>> {
     let begin = format!("-----BEGIN {label}-----");
     let end = format!("-----END {label}-----");
@@ -291,6 +297,11 @@ fn load_key(raw: &str) -> Result<rustls::pki_types::PrivateKeyDer<'static>, Stri
 fn resolve(home: &Path, p: &str) -> PathBuf {
     let path = PathBuf::from(p.trim());
     if path.is_absolute() { path } else { home.join(path) }
+}
+
+/// 供删除/备份等调用方复用同一套路径解析口径（相对数据目录或绝对路径）。
+pub fn resolve_path(home: &Path, p: &str) -> PathBuf {
+    resolve(home, p)
 }
 
 /// 解析用户配置的证书/私钥并构建 rustls 配置。

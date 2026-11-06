@@ -261,10 +261,10 @@ pub const CAPABILITIES: &[Capability] = &[
     Capability {
         entity: "tls",
         action: "delete",
-        status: Status::Intentional,
-        route: None,
-        frontend: &[],
-        reason: "本版不做证书删除；计划在 1.0.3-alpha3 补齐，删除前走 src/safety.rs",
+        status: Status::Required,
+        route: Some(r#"("DELETE", "/api/tls/cert")"#),
+        frontend: &["api('/api/tls/cert?confirm=delete', { method: 'DELETE'"],
+        reason: "",
     },
     // ---------------- 订阅令牌 ----------------
     Capability {
@@ -441,11 +441,27 @@ pub const CAPABILITIES: &[Capability] = &[
     },
     Capability {
         entity: "backup",
-        action: "create_restore",
-        status: Status::Intentional,
-        route: None,
-        frontend: &[],
-        reason: "本版不做面板数据备份/恢复；计划在 1.0.3-alpha3 补齐，只有升级前自动备份",
+        action: "list",
+        status: Status::Required,
+        route: Some(r#"("GET", "/api/backup")"#),
+        frontend: &["api('/api/backup')"],
+        reason: "",
+    },
+    Capability {
+        entity: "backup",
+        action: "create",
+        status: Status::Required,
+        route: Some(r#"("POST", "/api/backup")"#),
+        frontend: &["api('/api/backup', { method: 'POST'"],
+        reason: "",
+    },
+    Capability {
+        entity: "backup",
+        action: "restore",
+        status: Status::Required,
+        route: Some(r#"("POST", "/api/backup/restore")"#),
+        frontend: &["api('/api/backup/restore'"],
+        reason: "",
     },
     // ---------------- 更新 ----------------
     Capability {

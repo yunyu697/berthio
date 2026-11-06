@@ -622,6 +622,7 @@ fn route(
         ("GET", "/api/panel") => Ok(Response::json(200, &panel_payload(store, auth, demo, &cfg, &net))),
         ("GET", "/api/tls") => Ok(Response::json(200, &tls_payload(&cfg, &net))),
         ("POST", "/api/tls/generate") => tls_generate(store, &actor, &net),
+        ("DELETE", "/api/tls/cert") => tls_delete_cert(req, store, &actor, &net, demo),
         ("PATCH", "/api/panel") => patch_panel(req, store, &actor, &net),
         ("GET", "/api/update/status") => Ok(Response::json(200, &upd.status(&cfg.update))),
         ("POST", "/api/update/check") => update_check(upd, store, demo, &actor, &net.client_ip),
@@ -661,6 +662,9 @@ fn route(
         ("GET", "/api/export/file") => export_file(req, store, &actor, &net.client_ip),
         ("GET", "/api/export/tokens") => Ok(Response::json(200, &token_list(store))),
         ("POST", "/api/export/tokens") => create_token(req, store),
+        ("GET", "/api/backup") => Ok(Response::json(200, &crate::backup::overview(&store.home))),
+        ("POST", "/api/backup") => backup_create(store, &actor, &net, demo),
+        ("POST", "/api/backup/restore") => backup_restore(req, store, &actor, &net, demo),
         ("POST", "/api/migrate/preview") => migrate_preview(req, store, &actor, &net.client_ip),
         ("POST", "/api/migrate/apply") => migrate_apply(req, store, &actor, &net.client_ip),
         ("GET", "/api/logs") => Ok(Response::json(200, &logs_payload(store))),
@@ -925,6 +929,126 @@ fn tls_generate(store: &Store, actor: &str, net: &NetInfo) -> ApiResult<Response
             "cert": info.to_json(),
             "restart_required": true,
             "note": "私钥已以 0600 写入数据目录；启用 TLS 并重启后生效",
+        }),
+    ))
+}
+
+/// 删除自签/自定义证书与私钥：
+/// - 必须先关闭内置 TLS（配置与运行态都算），避免重启后直接起不来；
+/// - 两个文件都先过 `src/safety.rs` 的干跑校验，任一不在数据目录内就整体拒绝；
+/// - 逐个删除并记录指纹、到期与文件数，写审计 `tls.deleted`。
+fn tls_delete_cert(
+    req: &Request,
+    store: &Store,
+    actor: &str,
+    net: &NetInfo,
+    demo: bool,
+) -> ApiResult<Response> {
+    if demo {
+        return Err(ApiError::bad_request("演示模式只读：不删除证书")
+            .with_field("demo", "去掉 --demo 后重试"));
+    }
+    let confirm = req.query.get("confirm").map(|s| s.as_str()).unwrap_or("");
+    if confirm != "delete" {
+        store.audit_op(
+            "tls.deleted",
+            actor,
+            &net.client_ip,
+            "tls",
+            "denied",
+            json!({"reason": "confirm_mismatch"}),
+        );
+        return Err(ApiError::bad_request("删除证书需要二次确认：confirm=delete")
+            .with_field("confirm", "界面会在弹窗确认后带上该参数"));
+    }
+    let panel = store.config();
+    if panel.tls.enabled || ACTIVE_TLS.get().is_some() {
+        store.audit_op(
+            "tls.deleted",
+            actor,
+            &net.client_ip,
+            "tls",
+            "denied",
+            json!({"reason": "tls_enabled", "active": ACTIVE_TLS.get().is_some()}),
+        );
+        return Err(ApiError::conflict(
+            "内置 TLS 正在启用：请先在设置页关闭「内置 TLS」并保存，再删除证书",
+        ));
+    }
+    let cert = crate::tls::resolve_path(&store.home, &panel.tls.cert);
+    let key = crate::tls::resolve_path(&store.home, &panel.tls.key);
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for p in [cert, key] {
+        if p.exists() && !files.iter().any(|f| f == &p) {
+            files.push(p);
+        }
+    }
+    if files.is_empty() {
+        return Err(ApiError::not_found("证书/私钥文件不存在，无需删除"));
+    }
+    let info = std::fs::read_to_string(&files[0])
+        .ok()
+        .and_then(|text| crate::tls::inspect_pem(&text));
+    let allowed = vec![store.home.clone()];
+    for f in &files {
+        if let Err(e) = crate::safety::check_delete(f, &allowed) {
+            store.audit_op(
+                "tls.deleted",
+                actor,
+                &net.client_ip,
+                "tls",
+                "denied",
+                json!({"reason": "outside_data_dir", "file": f.display().to_string(), "message": e}),
+            );
+            return Err(ApiError::bad_request("拒绝删除数据目录之外的证书路径")
+                .with_field("file", format!("{}：{e}", f.display())));
+        }
+    }
+    let mut deleted: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for f in &files {
+        match crate::safety::remove_file(f, &allowed) {
+            Ok(()) => deleted.push(
+                f.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            ),
+            Err(e) => errors.push(e),
+        }
+    }
+    let detail = json!({
+        "files": deleted,
+        "files_deleted": deleted.len(),
+        "requested": files.len(),
+        "cert_fingerprint": info.as_ref().map(|i| i.fingerprint.clone()),
+        "not_after": info.as_ref().map(|i| i.not_after.clone()),
+        "errors": errors,
+    });
+    if !errors.is_empty() {
+        store.audit_op(
+            "tls.deleted",
+            actor,
+            &net.client_ip,
+            "tls",
+            "partial",
+            detail.clone(),
+        );
+        return Err(ApiError::internal(format!(
+            "部分证书文件删除失败（已删 {} 个）：{}",
+            deleted.len(),
+            errors.join("；")
+        )));
+    }
+    store.audit_op("tls.deleted", actor, &net.client_ip, "tls", "ok", detail.clone());
+    Ok(Response::json(
+        200,
+        &json!({
+            "deleted": true,
+            "files": deleted,
+            "files_deleted": detail["files_deleted"],
+            "cert_fingerprint": detail["cert_fingerprint"],
+            "restart_required": true,
+            "note": "证书与私钥已从数据目录删除；配置里的路径保留，重新生成或改用外部证书后启用 TLS",
         }),
     ))
 }
@@ -1712,6 +1836,73 @@ fn rotate_token(store: &Store, id: &str) -> ApiResult<Response> {
             "note": "旧 token 已立即失效；服务端只存新 token 的 SHA-256，明文仅本次返回",
         }),
     ))
+}
+
+fn backup_create(store: &Store, actor: &str, net: &NetInfo, demo: bool) -> ApiResult<Response> {
+    if demo {
+        return Err(ApiError::bad_request("演示模式只读：不生成备份")
+            .with_field("demo", "去掉 --demo 后重试"));
+    }
+    let out = crate::backup::create(&store.home, VERSION).map_err(ApiError::internal)?;
+    let files = out["manifest"]["files"].as_array().map(|a| a.len()).unwrap_or(0);
+    store.audit_op(
+        "backup.created",
+        actor,
+        &net.client_ip,
+        out["name"].as_str().unwrap_or("-"),
+        "ok",
+        json!({
+            "files": files,
+            "bytes": out["manifest"]["total_bytes"],
+            "path": out["path"],
+        }),
+    );
+    Ok(Response::json(201, &out))
+}
+
+fn backup_restore(
+    req: &Request,
+    store: &Store,
+    actor: &str,
+    net: &NetInfo,
+    demo: bool,
+) -> ApiResult<Response> {
+    if demo {
+        return Err(ApiError::bad_request("演示模式只读：不执行恢复")
+            .with_field("demo", "去掉 --demo 后重试"));
+    }
+    let body = body_json(req)?;
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let confirm = body.get("confirm").and_then(|v| v.as_str()).unwrap_or("");
+    match crate::backup::restore(&store.home, name, confirm) {
+        Ok(out) => {
+            store.audit_op(
+                "backup.restored",
+                actor,
+                &net.client_ip,
+                name,
+                "ok",
+                json!({
+                    "restored": out["restored"],
+                    "files": out["files"],
+                    "rollback_snapshot": out["rollback_snapshot"],
+                }),
+            );
+            Ok(Response::json(200, &out))
+        }
+        Err(e) => {
+            store.audit_op(
+                "backup.restored",
+                actor,
+                &net.client_ip,
+                name,
+                "denied",
+                json!({"message": e}),
+            );
+            Err(ApiError::bad_request(format!("恢复失败：{e}"))
+                .with_field("confirm", "核对备份名并确认清单完整性"))
+        }
+    }
 }
 
 fn subscription(req: &Request, token: &str, store: &Store) -> ApiResult<Response> {

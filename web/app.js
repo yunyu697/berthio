@@ -289,6 +289,9 @@
     $('#wizard-commit').addEventListener('click', function () { if (wizardStep >= 6) commitWizard(); else wizardGo(1); });
     $('#panel-save').addEventListener('click', savePanelConfig);
     $('#tls-generate').addEventListener('click', generateTlsCert);
+    $('#tls-delete').addEventListener('click', deleteTlsCert);
+    $('#backup-create').addEventListener('click', createBackup);
+    $('#backup-refresh').addEventListener('click', loadBackups);
     $('#wz-protocol').addEventListener('change', updateWizardFields);
     $('#wz-port').addEventListener('input', updateWizardFields);
     bindAuditEvents();
@@ -297,6 +300,7 @@
     bindProcessEvents();
     bindExportEvents();
     bindTokenActions();
+    bindBackupActions();
     bindMirrorEvents();
     bindImportEvents();
     bindUpdateEvents();
@@ -1706,7 +1710,10 @@
     var auth = UI.panel.auth || {};
     var foot = $('#auth-foot');
     if (foot && auth.password_storage) foot.textContent = auth.password_storage + '；Cookie ' + (auth.cookie || 'HttpOnly') + '。';
+    var bh = $('#backup-home');
+    if (bh) bh.textContent = UI.panel.home || '—';
     renderTls();
+    loadBackups();
   }
 
   /* ---------------- 内置 TLS ---------------- */
@@ -1753,6 +1760,111 @@
       toast('生成失败', e.message + (extra ? ' · ' + extra : ''));
     });
   }
+  function deleteTlsCert() {
+    if (DEMO) { toast('演示模式只读'); return; }
+    var body = '<div class="info-note">将删除数据目录内的证书与私钥文件（默认 <span class="mono">config/tls/panel.crt</span> / <span class="mono">panel.key</span>）。<br>' +
+      '删除前会逐一校验目标路径必须位于数据目录内，否则整体拒绝；已启用内置 TLS 时需先关闭并保存。<br>' +
+      '会写入审计日志 <span class="mono">tls.deleted</span>（含证书指纹、到期时间与删除文件数）。</div>';
+    openModal('删除证书？', '不可撤销，需重新生成或改用外部证书', body, '确认删除', function () {
+      api('/api/tls/cert?confirm=delete', { method: 'DELETE', body: '{}' })
+        .then(function (r) {
+          toast('证书已删除', '已删除 ' + r.files_deleted + ' 个文件；重新生成或改用外部证书后再启用 TLS');
+          loadAll();
+        })
+        .catch(function (e) {
+          var extra = (e.fields || []).map(function (f) { return f.field + '：' + f.message; }).join(' · ');
+          toast('删除失败', e.message + (extra ? ' · ' + extra : ''));
+        });
+    });
+  }
+
+  /* ---------------- 面板数据备份 / 恢复 ---------------- */
+  function loadBackups() {
+    var plan = $('#backup-plan');
+    if (DEMO) {
+      if (plan) plan.textContent = '演示模式只读：不读取真实备份目录。';
+      var box0 = $('#backup-list');
+      if (box0) box0.innerHTML = '';
+      return;
+    }
+    api('/api/backup').then(renderBackups).catch(function (e) {
+      if (plan) plan.textContent = '读取备份清单失败：' + e.message;
+    });
+  }
+
+  function renderBackups(r) {
+    UI.backups = r || {};
+    var plan = $('#backup-plan');
+    if (plan) {
+      var inc = ((r && r.include) || []);
+      plan.innerHTML = (inc.length
+        ? '本次备份包含 ' + inc.length + ' 个文件：' + inc.map(function (f) {
+          return '<div>· <span class="mono">' + esc(f.path) + '</span>（' + esc(f.purpose || '') + '，' + fmtBytes(f.bytes || 0) + '）</div>';
+        }).join('')
+        : '当前没有可备份的文件。') +
+        ((r && r.excluded && r.excluded.length)
+          ? '<div class="muted" style="margin-top:6px">不包含：' + r.excluded.map(function (f) {
+            return esc(f.path) + '（' + esc(f.reason) + '）';
+          }).join('；') + '</div>'
+          : '');
+    }
+    var box = $('#backup-list');
+    if (!box) return;
+    var items = (r && r.backups) || [];
+    if (!items.length) {
+      box.innerHTML = '<div class="table-note">还没有手动备份；升级前的单文件自动备份会显示为 auto-upgrade（只能人工处理，不能在此恢复）。</div>';
+      return;
+    }
+    box.innerHTML = items.map(function (b) {
+      return '<div class="token-row" data-backup="' + esc(b.name) + '">' +
+        '<span class="mono mask">' + esc(b.name) + '</span>' +
+        '<span class="badge ' + (b.restorable ? 'info' : 'muted') + ' plain">' + esc(b.kind || 'unknown') + '</span>' +
+        '<span class="muted" style="font-size:11px">' + (b.files || 0) + ' 个文件 · ' + fmtBytes(b.bytes || 0) + '</span>' +
+        (b.app_version ? '<span class="muted" style="font-size:11px">v' + esc(b.app_version) + '</span>' : '') +
+        (b.restorable ? '<div class="row-actions"><button class="btn btn-sm js-backup-restore">恢复</button></div>' : '') +
+        '</div>';
+    }).join('');
+  }
+
+  function bindBackupActions() {
+    document.addEventListener('click', function (e) {
+      var row = e.target && e.target.closest ? e.target.closest('[data-backup]') : null;
+      if (!row || DEMO || !e.target.closest('.js-backup-restore')) return;
+      restoreBackup(row.getAttribute('data-backup'));
+    });
+  }
+
+  function restoreBackup(name) {
+    var items = (UI.backups && UI.backups.backups) || [];
+    var found = items.filter(function (b) { return b.name === name; })[0] || {};
+    var paths = found.paths || [];
+    var body = '<div class="info-note">将用备份 <span class="mono">' + esc(name) + '</span> 覆盖以下文件：' +
+      (paths.length ? paths.map(function (p) { return '<div>· <span class="mono">' + esc(p) + '</span></div>'; }).join('')
+        : '<div>（清单未提供文件列表，恢复时会按备份清单逐项校验）</div>') +
+      '<br>恢复前会核对每个文件的 SHA-256；校验失败不会改动现场。写入失败会自动回滚已替换的文件。<br>' +
+      '恢复后必须重启面板才会生效；会写入审计日志 <span class="mono">backup.restored</span>。</div>';
+    openModal('恢复备份？', '会覆盖当前配置与状态', body, '确认恢复', function () {
+      api('/api/backup/restore', { method: 'POST', body: JSON.stringify({ name: name, confirm: name }) })
+        .then(function (r) {
+          toast('已恢复 ' + r.restored + ' 个文件', '回滚快照 ' + r.rollback_snapshot + '；请重启面板后生效');
+          loadBackups();
+        })
+        .catch(function (e) {
+          var extra = (e.fields || []).map(function (f) { return f.field + '：' + f.message; }).join(' · ');
+          toast('恢复失败', e.message + (extra ? ' · ' + extra : ''));
+        });
+    });
+  }
+
+  function createBackup() {
+    if (DEMO) { toast('演示模式只读'); return; }
+    api('/api/backup', { method: 'POST', body: '{}' }).then(function (r) {
+      var n = ((r.manifest && r.manifest.files) || []).length;
+      toast('备份完成', r.name + ' · ' + n + ' 个文件 · ' + fmtBytes((r.manifest && r.manifest.total_bytes) || 0));
+      loadBackups();
+    }).catch(function (e) { toast('备份失败', e.message); });
+  }
+
   /* ---------------- 软件更新 ---------------- */
   function fmtPct(n) {
     n = Number(n) || 0;

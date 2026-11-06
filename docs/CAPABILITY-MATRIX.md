@@ -68,7 +68,7 @@
 | 查状态 | 仅后端 | `GET /api/tls` | 证书信息随 `GET /api/panel` 返回 |
 | 生成 / 重新签发 | 必需 | `POST /api/tls/generate` | 设置页「一键自签」（重签=再点一次） |
 | 启用/停用 | 必需 | `PATCH /api/panel`（`tls_enabled`） | 设置页开关 |
-| 删除证书 | 有意不做（本版） | — | 计划在 1.0.3-alpha3 补齐，删除前走 `src/safety.rs` |
+| 删除证书 | 必需 | `DELETE /api/tls/cert?confirm=delete` | 设置页「删除证书」+ 弹窗二次确认；删除前走 `src/safety.rs`，目标必须在数据目录内 |
 
 ## 订阅令牌（export.token）
 
@@ -115,7 +115,10 @@
 | 导出文件 | 仅后端 | `GET /api/export/file` | 界面改用 preview + Blob 下载，接口供脚本 |
 | 3x-ui 导入预览 | 必需 | `POST /api/migrate/preview` | 导入页 |
 | 3x-ui 导入应用 | 必需 | `POST /api/migrate/apply` | 导入页 |
-| 面板数据备份 / 恢复 | 有意不做（本版） | — | 计划在 1.0.3-alpha3 补齐；本版只有 `state/backups/` 的升级前自动备份 |
+| 面板数据备份清单 | 必需 | `GET /api/backup` | 设置页「数据目录与备份」列出包含/排除文件与理由 |
+| 面板数据备份 | 必需 | `POST /api/backup` | 「立即备份」，落 `state/backups/manual-*` + `manifest.json` |
+| 面板数据恢复 | 必需 | `POST /api/backup/restore` | 备份列表「恢复」+ 二次确认；先校验 SHA-256，失败不动现场，逐文件原子替换并支持回滚 |
+| 审计日志 / 运行态文件纳入备份 | 有意不做 | — | 审计只追加、PID/升级进度属运行态；由清单显式列为排除项并写理由 |
 
 ## 更新（update）
 
