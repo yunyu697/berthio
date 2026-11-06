@@ -2229,8 +2229,10 @@ tbody tr:hover { background: var(--surface-2); }
               <div class="form-grid">
                 <div class="field"><label>监听地址</label><select class="select" id="panel-listen"><option value="127.0.0.1">127.0.0.1（默认，安全）</option><option value="0.0.0.0">0.0.0.0（需确认）</option></select></div>
                 <div class="field"><label>端口</label><input class="input" id="panel-port" value="18080" aria-label="面板端口"></div>
-                <div class="field"><label>TLS 模式</label><select class="select"><option>自签证书（TOFU）</option><option>ACME · HTTP-01</option><option>ACME · DNS-01</option></select></div>
-                <div class="field"><label>证书指纹</label><input class="input mono" value="SHA256 9F:2C:7A:…:B1" readonly></div>
+                <div class="field"><label>内置 TLS</label><select class="select" id="tls-enabled"><option value="off">关闭（明文 HTTP）</option><option value="on">开启（HTTPS）</option></select></div>
+                <div class="field"><label>明文策略</label><select class="select" id="plain-policy"><option value="warn">warn · 允许明文并常驻提示（默认）</option><option value="loopback-only">loopback-only · 拒绝非回环明文登录</option><option value="strict">strict · 拒绝非回环明文请求</option></select></div>
+                <div class="field"><label>证书 PEM 路径（相对数据目录或绝对）</label><input class="input mono" id="tls-cert" placeholder="config/tls/panel.crt" aria-label="证书路径"></div>
+                <div class="field"><label>私钥 PEM 路径</label><input class="input mono" id="tls-key" placeholder="config/tls/panel.key" aria-label="私钥路径"></div>
                 <div class="field"><label>对外地址（导出 server 字段）</label><input class="input mono" id="panel-address-input" placeholder="example.com 或 1.2.3.4" aria-label="对外地址"></div>
                 <div class="field"><label>面板版本</label><input class="input mono" id="panel-version-input" value="—" readonly aria-label="面板版本"></div>
               </div>
@@ -2243,11 +2245,12 @@ tbody tr:hover { background: var(--surface-2); }
                 <div class="switch-row-text"><b>我已阅读并确认远程访问风险</b><span>勾选 + 输入短语 ENABLE-REMOTE 才会保存为非回环监听</span></div>
               </div>
               <div class="auth-msg" id="remote-status" style="margin-top:8px"></div>
+              <div class="auth-msg mono" id="tls-info" style="margin-top:8px"></div>
               <div class="info-note" style="margin-top:10px">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v.1M12 11v5"></path></svg>
-                面板不会修改宿主防火墙；开启公网后端口是否可达仍由你决定。ACME 需要 80 端口或 DNS API。
+                面板不会修改宿主防火墙；开启公网后端口是否可达仍由你决定。TLS 证书/私钥/策略变更需重启进程生效。
               </div>
-              <div class="setting-actions"><button class="btn" id="panel-save">保存</button><button class="btn btn-soft" id="remote-disable">关闭远程访问</button></div>
+              <div class="setting-actions"><button class="btn" id="panel-save">保存</button><button class="btn btn-soft" id="tls-generate">生成自签证书</button><button class="btn btn-soft" id="remote-disable">关闭远程访问</button></div>
             </div>
           </div>
 

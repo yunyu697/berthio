@@ -11,6 +11,7 @@ mod safety;
 mod sources;
 mod state;
 mod supervisor;
+mod tls;
 mod update;
 mod util;
 mod wizard;

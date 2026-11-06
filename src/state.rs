@@ -37,6 +37,46 @@ pub struct RemoteAccess {
     pub trusted_proxies: Vec<String>,
 }
 
+/// 内置 TLS 与明文策略。默认关闭 TLS、明文策略 warn，保证升级后行为不变。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PanelTls {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 证书路径：绝对路径，或相对数据目录（自签默认 `config/tls/panel.crt`）。
+    #[serde(default = "default_tls_cert")]
+    pub cert: String,
+    #[serde(default = "default_tls_key")]
+    pub key: String,
+    /// `warn` / `loopback-only` / `strict`。
+    #[serde(default = "default_plain_policy")]
+    pub plain_policy: String,
+}
+
+fn default_tls_cert() -> String {
+    crate::tls::SELF_SIGNED_CERT.to_string()
+}
+fn default_tls_key() -> String {
+    crate::tls::SELF_SIGNED_KEY.to_string()
+}
+fn default_plain_policy() -> String {
+    "warn".to_string()
+}
+
+impl Default for PanelTls {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cert: default_tls_cert(),
+            key: default_tls_key(),
+            plain_policy: default_plain_policy(),
+        }
+    }
+}
+
+pub fn plain_policy_known(p: &str) -> bool {
+    matches!(p, "warn" | "loopback-only" | "strict")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateMirror {
     pub id: String,
@@ -101,6 +141,8 @@ pub struct PanelConfig {
     pub remote_access: RemoteAccess,
     #[serde(default)]
     pub update: UpdateConfig,
+    #[serde(default)]
+    pub tls: PanelTls,
 }
 
 fn default_schema() -> u32 {
@@ -119,6 +161,7 @@ impl Default for PanelConfig {
             log_keep_days: 14,
             remote_access: RemoteAccess::default(),
             update: UpdateConfig::default(),
+            tls: PanelTls::default(),
         }
     }
 }

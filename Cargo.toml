@@ -24,6 +24,12 @@ ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] 
 rusqlite = { version = "0.32", features = ["bundled"] }
 # 自更新只做 minisign 验签（Ed25519），不引入完整 minisign 工具链。
 minisign-verify = "0.3"
+# 面板内置 TLS：rustls 已在依赖树中（ureq 使用），这里显式复用同一版本，仍用 ring provider。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# 一键自签证书：纯 Rust 实现，避免调用系统 OpenSSL / certutil。
+rcgen = "0.12"
+# 枚举本机网卡地址，用于生成证书 SAN（跨平台，无系统命令依赖）。
+if-addrs = "0.13"
 
 [profile.release]
 opt-level = "s"

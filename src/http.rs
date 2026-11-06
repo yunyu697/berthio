@@ -13,7 +13,7 @@ use crate::wizard;
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +21,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_BODY: usize = 8 * 1024 * 1024;
 const SESSION_COOKIE: &str = "berthio_session";
 const REMOTE_CONFIRM_PHRASE: &str = "ENABLE-REMOTE";
+/// 进程当前是否真的以 TLS 运行，以及生效证书的信息（启动时写入）。
+static ACTIVE_TLS: std::sync::OnceLock<crate::tls::CertInfo> = std::sync::OnceLock::new();
 
 struct Request {
     method: String,
@@ -49,25 +51,75 @@ impl Request {
     }
 }
 
-/// 客户端网络信息：默认只信 peer；只有 peer 属于 trusted_proxies（或显式开启）时才解析转发头。
+/// 客户端网络信息：默认只信 peer；只有 peer 属于 trusted_proxies（CIDR 或精确 IP）时才解析转发头。
 struct NetInfo {
     client_ip: String,
     https: bool,
     behind_proxy: bool,
 }
 
-fn net_info(req: &Request, cfg: &PanelConfig) -> NetInfo {
+/// 判断 IP 是否在 CIDR 内；也接受精确 IP 条目。IPv4 与 IPv6 分开算，跨族一律不匹配。
+fn ip_in_cidr(ip: &str, entry: &str) -> bool {
+    use std::net::IpAddr;
+    use std::str::FromStr;
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return false;
+    }
+    let Ok(ip_addr) = IpAddr::from_str(ip.trim()) else { return false };
+    let (net_part, prefix) = match entry.split_once('/') {
+        Some((n, p)) => match p.parse::<u32>() {
+            Ok(p) => (n, Some(p)),
+            Err(_) => return false,
+        },
+        None => (entry, None),
+    };
+    let Ok(net_addr) = IpAddr::from_str(net_part) else { return false };
+    match (ip_addr, net_addr) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => {
+            let bits = prefix.unwrap_or(32).min(32);
+            if bits == 0 {
+                return true;
+            }
+            let mask = u32::MAX << (32 - bits);
+            (u32::from(a) & mask) == (u32::from(b) & mask)
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => {
+            let bits = prefix.unwrap_or(128).min(128);
+            if bits == 0 {
+                return true;
+            }
+            let mask = u128::MAX << (128 - bits);
+            (u128::from(a) & mask) == (u128::from(b) & mask)
+        }
+        _ => false,
+    }
+}
+
+fn trusted_proxy(cfg: &PanelConfig, ip: &str) -> bool {
+    cfg.remote_access
+        .trusted_proxies
+        .iter()
+        .any(|entry| ip_in_cidr(ip, entry))
+}
+
+pub fn is_loopback_ip(ip: &str) -> bool {
+    use std::net::IpAddr;
+    use std::str::FromStr;
+    match IpAddr::from_str(ip.trim()) {
+        Ok(IpAddr::V4(a)) => a.is_loopback(),
+        Ok(IpAddr::V6(a)) => a.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+fn net_info(req: &Request, cfg: &PanelConfig, conn_secure: bool) -> NetInfo {
     let trusted_env = std::env::var("BERTHIO_TRUST_PROXY").ok().as_deref() == Some("1");
-    let trusted = trusted_env
-        || cfg
-            .remote_access
-            .trusted_proxies
-            .iter()
-            .any(|p| p.eq_ignore_ascii_case(&req.peer_ip));
+    let trusted = trusted_env || trusted_proxy(cfg, &req.peer_ip);
     if !trusted {
         return NetInfo {
             client_ip: req.peer_ip.clone(),
-            https: false,
+            https: conn_secure,
             behind_proxy: false,
         };
     }
@@ -75,22 +127,18 @@ fn net_info(req: &Request, cfg: &PanelConfig) -> NetInfo {
     if let Some(xff) = req.header("x-forwarded-for") {
         let hops: Vec<&str> = xff.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
         for hop in hops.iter().rev() {
-            if cfg
-                .remote_access
-                .trusted_proxies
-                .iter()
-                .any(|p| p.eq_ignore_ascii_case(hop))
-            {
+            if trusted_proxy(cfg, hop) {
                 continue;
             }
             client_ip = hop.to_string();
             break;
         }
     }
-    let https = req
-        .header("x-forwarded-proto")
-        .map(|v| v.eq_ignore_ascii_case("https"))
-        .unwrap_or(false);
+    let https = conn_secure
+        || req
+            .header("x-forwarded-proto")
+            .map(|v| v.eq_ignore_ascii_case("https"))
+            .unwrap_or(false);
     NetInfo {
         client_ip,
         https,
@@ -208,7 +256,7 @@ fn parse_query(raw: &str) -> HashMap<String, String> {
     map
 }
 
-fn read_request(stream: &mut TcpStream, peer_ip: &str) -> Result<Request, String> {
+fn read_request<R: Read>(stream: &mut R, peer_ip: &str) -> Result<Request, String> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     loop {
@@ -375,33 +423,80 @@ pub fn serve(listen: &str, store: Arc<Store>, auth: Arc<Auth>, sup: Arc<Supervis
             std::process::exit(1);
         }
     };
+    let tls_rt = if cfg.tls.enabled {
+        match crate::tls::load(&store.home, &cfg.tls.cert, &cfg.tls.key) {
+            Ok(rt) => Some(Arc::new(rt)),
+            Err(e) => {
+                eprintln!("[berthio] 启用内置 TLS 失败：{e}");
+                eprintln!("[berthio] 修好证书/私钥路径后重启；未自动降级为明文，避免静默失去 TLS。");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(rt) = &tls_rt {
+        let _ = ACTIVE_TLS.set(rt.info.clone());
+        if let Some(w) = &rt.warning {
+            eprintln!("[berthio] {w}");
+        }
+        crate::tls::spawn_expiry_watch(rt.info.clone());
+        println!(
+            "[berthio] TLS 证书：{}（到期 {}，SAN {} 项）",
+            rt.info.fingerprint,
+            rt.info.not_after,
+            rt.info.sans.len()
+        );
+    }
+    let scheme = if tls_rt.is_some() { "https" } else { "http" };
     println!(
-        "[berthio] {}{} 已启动: http://{}  (home={}, auth={})",
+        "[berthio] {}{} 已启动: {}://{}  (home={}, auth={}, plain_policy={})",
         VERSION,
         if demo { " (demo)" } else { "" },
+        scheme,
         listen,
         store.home.display(),
-        if demo { "demo" } else { "session+csrf" }
+        if demo { "demo" } else { "session+csrf" },
+        cfg.tls.plain_policy
     );
+    if tls_rt.is_none() && !state::listen_is_loopback(listen) {
+        eprintln!(
+            "[berthio] 警告：明文监听对外网开放，plain_policy={}；建议启用内置 TLS 或确保可信反代终止 TLS",
+            cfg.tls.plain_policy
+        );
+    }
     let upd = Arc::new(Manager::new(&store.home, VERSION, demo));
     for stream in listener.incoming() {
         match stream {
-            Ok(mut s) => {
+            Ok(s) => {
                 let store = Arc::clone(&store);
                 let auth = Arc::clone(&auth);
                 let sup = Arc::clone(&sup);
                 let upd = Arc::clone(&upd);
+                let tls_rt = tls_rt.clone();
                 std::thread::spawn(move || {
                     let _ = s.set_read_timeout(Some(Duration::from_secs(15)));
                     let peer_ip = s
                         .peer_addr()
                         .map(|a| a.ip().to_string())
                         .unwrap_or_else(|_| "unknown".into());
-                    let resp = match read_request(&mut s, &peer_ip) {
-                        Ok(req) => route(&req, &store, &auth, &sup, &upd, demo),
-                        Err(e) => Response::json(400, &json!({"error":{"code":"bad_request","message":e}})),
-                    };
-                    let _ = write_response(&mut s, resp);
+                    match tls_rt {
+                        Some(rt) => {
+                            let conn = match rustls::ServerConnection::new(Arc::clone(&rt.config)) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    eprintln!("[berthio] TLS 会话初始化失败: {e}");
+                                    return;
+                                }
+                            };
+                            let mut stream = rustls::StreamOwned::new(conn, s);
+                            handle_conn(&mut stream, &peer_ip, true, &store, &auth, &sup, &upd, demo);
+                        }
+                        None => {
+                            let mut s = s;
+                            handle_conn(&mut s, &peer_ip, false, &store, &auth, &sup, &upd, demo);
+                        }
+                    }
                 });
             }
             Err(e) => eprintln!("[berthio] accept 失败: {e}"),
@@ -409,7 +504,24 @@ pub fn serve(listen: &str, store: Arc<Store>, auth: Arc<Auth>, sup: Arc<Supervis
     }
 }
 
-fn write_response(stream: &mut TcpStream, resp: Response) -> std::io::Result<()> {
+fn handle_conn<R: Read + Write>(
+    stream: &mut R,
+    peer_ip: &str,
+    secure: bool,
+    store: &Store,
+    auth: &Auth,
+    sup: &Supervisor,
+    upd: &Arc<Manager>,
+    demo: bool,
+) {
+    let resp = match read_request(stream, peer_ip) {
+        Ok(req) => route(&req, store, auth, sup, upd, demo, secure),
+        Err(e) => Response::json(400, &json!({"error":{"code":"bad_request","message":e}})),
+    };
+    let _ = write_response(stream, resp);
+}
+
+fn write_response<W: Write>(stream: &mut W, resp: Response) -> std::io::Result<()> {
     let reason = match resp.status {
         200 => "OK",
         201 => "Created",
@@ -441,11 +553,37 @@ fn write_response(stream: &mut TcpStream, resp: Response) -> std::io::Result<()>
     stream.flush()
 }
 
-fn route(req: &Request, store: &Store, auth: &Auth, sup: &Supervisor, upd: &Arc<Manager>, demo: bool) -> Response {
+fn route(
+    req: &Request,
+    store: &Store,
+    auth: &Auth,
+    sup: &Supervisor,
+    upd: &Arc<Manager>,
+    demo: bool,
+    conn_secure: bool,
+) -> Response {
     let cfg = store.config();
-    let net = net_info(req, &cfg);
+    let net = net_info(req, &cfg, conn_secure);
     let token = req.cookie(SESSION_COOKIE);
     let path = req.path.as_str();
+    // 明文策略：只有“确认不是 HTTPS”的来源才可能被拒；回环与可信反代终止 TLS 的请求不受影响。
+    if !net.https && !is_loopback_ip(&net.client_ip) {
+        let policy = cfg.tls.plain_policy.as_str();
+        let plaintext_login = matches!(req.method.as_str(), "POST")
+            && matches!(path, "/api/auth/login" | "/api/auth/setup" | "/api/auth/password");
+        if policy == "strict" || (policy == "loopback-only" && plaintext_login) {
+            let msg = if policy == "strict" {
+                "面板要求 HTTPS：当前请求来自非回环地址且未使用 TLS，已拒绝"
+            } else {
+                "明文策略 loopback-only：拒绝非回环来源的明文登录，请使用 HTTPS"
+            };
+            return Response::json(
+                403,
+                &json!({"error": {"code": "https_required", "message": msg, "policy": policy, "client_ip": net.client_ip}}),
+            )
+            .with("X-Berthio-HTTPS", "required");
+        }
+    }
     let is_public = matches!(path, "/" | "/index.html" | "/app.js" | "/favicon.ico" | "/healthz")
         || matches!(path, "/api/auth/status" | "/api/auth/setup" | "/api/auth/login")
         || path.starts_with("/sub/");
@@ -481,7 +619,9 @@ fn route(req: &Request, store: &Store, auth: &Auth, sup: &Supervisor, upd: &Arc<
         ("POST", "/api/auth/login") => auth_login(req, store, auth, &net),
         ("POST", "/api/auth/logout") => auth_logout(req, store, auth, token.as_deref(), &net),
         ("POST", "/api/auth/password") => auth_password(req, store, auth, &net),
-        ("GET", "/api/panel") => Ok(Response::json(200, &panel_payload(store, auth, demo, &cfg))),
+        ("GET", "/api/panel") => Ok(Response::json(200, &panel_payload(store, auth, demo, &cfg, &net))),
+        ("GET", "/api/tls") => Ok(Response::json(200, &tls_payload(&cfg, &net))),
+        ("POST", "/api/tls/generate") => tls_generate(store, &actor, &net),
         ("PATCH", "/api/panel") => patch_panel(req, store, &actor, &net),
         ("GET", "/api/update/status") => Ok(Response::json(200, &upd.status(&cfg.update))),
         ("POST", "/api/update/check") => update_check(upd, store, demo, &actor),
@@ -546,10 +686,18 @@ fn route(req: &Request, store: &Store, auth: &Auth, sup: &Supervisor, upd: &Arc<
         }
         _ => Err(ApiError::not_found(format!("{} {}", req.method, req.path))),
     };
-    match result {
+    let mut resp = match result {
         Ok(r) => r,
         Err(e) => Response::json(e.status, &e.to_json()),
+    };
+    // TLS（或可信反代终止 TLS）生效时统一加 HSTS；明文访问不加，避免把浏览器锁死在不可用的 HTTPS。
+    if net.https {
+        resp.extra.push((
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains".to_string(),
+        ));
     }
+    resp
 }
 
 fn auth_setup(req: &Request, store: &Store, auth: &Auth) -> ApiResult<Response> {
@@ -621,7 +769,13 @@ fn auth_password(req: &Request, store: &Store, auth: &Auth, net: &NetInfo) -> Ap
     Ok(Response::json(200, &out).with("Set-Cookie", clear_cookie(net.https)))
 }
 
-fn panel_payload(store: &Store, auth: &Auth, demo: bool, cfg: &PanelConfig) -> serde_json::Value {
+fn panel_payload(
+    store: &Store,
+    auth: &Auth,
+    demo: bool,
+    cfg: &PanelConfig,
+    net: &NetInfo,
+) -> serde_json::Value {
     let state = store.snapshot();
     let clients: usize = state.inbounds.iter().map(|i| i.clients.len()).sum();
     let (effective, forced) = cfg.effective_listen();
@@ -645,16 +799,72 @@ fn panel_payload(store: &Store, auth: &Auth, demo: bool, cfg: &PanelConfig) -> s
             "confirm_phrase_required": REMOTE_CONFIRM_PHRASE,
             "risks": remote_risks(),
         },
+        "tls": {
+            "configured": cfg.tls.enabled,
+            "active": ACTIVE_TLS.get().map(|_| true).unwrap_or(false),
+            "cert_path": cfg.tls.cert,
+            "key_path": cfg.tls.key,
+            "plain_policy": cfg.tls.plain_policy,
+            "insecure_request": !net.https,
+            "client_ip": net.client_ip,
+            "cert": ACTIVE_TLS.get().map(|i| i.to_json()),
+        },
         "auth": {
             "mode": if demo { "demo" } else { "session" },
             "initialized": auth.initialized(),
             "session_ttl_seconds": auth.session_ttl(),
             "password_storage": "PBKDF2-HMAC-SHA256（随机盐 + 迭代，只存哈希）",
-            "cookie": "HttpOnly; SameSite=Strict; 反代 https 时自动加 Secure",
+            "cookie": "HttpOnly; SameSite=Strict; HTTPS 下自动加 Secure",
             "csrf": "所有写操作要求 X-Berthio-CSRF",
-            "forwarded_headers": "默认不信任 X-Forwarded-For / X-Forwarded-Proto；只有 peer 在 trusted_proxies 时才解析",
+            "forwarded_headers": "默认不信任 X-Forwarded-For / X-Forwarded-Proto；只有 peer 属于 trusted_proxies（支持 CIDR）时才解析",
         }
     })
+}
+
+/// TLS 现状：既给出配置，也给出真实生效的证书信息（只有以 TLS 启动过才有）。
+fn tls_payload(cfg: &PanelConfig, net: &NetInfo) -> serde_json::Value {
+    let active = ACTIVE_TLS.get();
+    json!({
+        "configured": cfg.tls.enabled,
+        "active": active.is_some(),
+        "cert_path": cfg.tls.cert,
+        "key_path": cfg.tls.key,
+        "plain_policy": cfg.tls.plain_policy,
+        "policies": ["warn", "loopback-only", "strict"],
+        "insecure_request": !net.https,
+        "client_ip": net.client_ip,
+        "cert": active.map(|i| i.to_json()),
+        "scheme_this_request": if net.https { "https" } else { "http" },
+        "hsts": if net.https { "max-age=31536000; includeSubDomains" } else { "" },
+        "note": "证书/密钥/策略变更需重启进程生效；生成自签证书不会自动启用",
+    })
+}
+
+fn tls_generate(store: &Store, actor: &str, net: &NetInfo) -> ApiResult<Response> {
+    let info = crate::tls::generate_self_signed(&store.home)
+        .map_err(|e| ApiError::internal(format!("生成自签证书失败: {e}")))?;
+    let mut panel = store.config();
+    panel.tls.cert = crate::tls::SELF_SIGNED_CERT.to_string();
+    panel.tls.key = crate::tls::SELF_SIGNED_KEY.to_string();
+    let cfg = Config { home: store.home.clone() };
+    cfg.save_panel(&panel)?;
+    store.set_config(panel.clone());
+    store.audit(
+        "tls.cert.generated",
+        actor,
+        json!({"fingerprint": info.fingerprint, "not_after": info.not_after, "sans": info.sans, "ip": net.client_ip}),
+    );
+    Ok(Response::json(
+        200,
+        &json!({
+            "ok": true,
+            "cert_path": crate::tls::SELF_SIGNED_CERT,
+            "key_path": crate::tls::SELF_SIGNED_KEY,
+            "cert": info.to_json(),
+            "restart_required": true,
+            "note": "私钥已以 0600 写入数据目录；启用 TLS 并重启后生效",
+        }),
+    ))
 }
 
 fn remote_risks() -> Vec<&'static str> {
@@ -767,6 +977,56 @@ fn patch_panel(req: &Request, store: &Store, actor: &str, net: &NetInfo) -> ApiR
             changed = true;
         }
     }
+    let mut tls_changed = false;
+    if let Some(cert) = body.get("tls_cert").and_then(|v| v.as_str()) {
+        let cert = cert.trim();
+        if cert.is_empty() {
+            return Err(ApiError::bad_request("证书路径不能为空")
+                .with_field("tls_cert", "可先点「生成自签证书」"));
+        }
+        if cert != panel.tls.cert {
+            panel.tls.cert = cert.to_string();
+            tls_changed = true;
+            changed = true;
+        }
+    }
+    if let Some(key) = body.get("tls_key").and_then(|v| v.as_str()) {
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(ApiError::bad_request("私钥路径不能为空")
+                .with_field("tls_key", "可先点「生成自签证书」"));
+        }
+        if key != panel.tls.key {
+            panel.tls.key = key.to_string();
+            tls_changed = true;
+            changed = true;
+        }
+    }
+    if let Some(policy) = body.get("plain_policy").and_then(|v| v.as_str()) {
+        let policy = policy.trim();
+        if !state::plain_policy_known(policy) {
+            return Err(ApiError::bad_request("明文策略不支持")
+                .with_field("plain_policy", "可选：warn / loopback-only / strict"));
+        }
+        if policy != panel.tls.plain_policy {
+            panel.tls.plain_policy = policy.to_string();
+            tls_changed = true;
+            changed = true;
+        }
+    }
+    if let Some(enabled) = body.get("tls_enabled").and_then(|v| v.as_bool()) {
+        if enabled && !panel.tls.enabled {
+            // 启用前先真实加载一次，证书/私钥不可用就不让配置落盘，避免重启直接起不来。
+            crate::tls::load(&store.home, &panel.tls.cert, &panel.tls.key).map_err(|e| {
+                ApiError::bad_request("证书/私钥无法用于 TLS").with_field("tls", e)
+            })?;
+        }
+        if enabled != panel.tls.enabled {
+            panel.tls.enabled = enabled;
+            tls_changed = true;
+            changed = true;
+        }
+    }
     if !panel.remote_access.enabled && !state::listen_is_loopback(&panel.listen) {
         let mut err = ApiError::bad_request("监听非回环地址必须先确认开启远程访问")
             .with_field("listen", panel.listen.clone())
@@ -787,6 +1047,9 @@ fn patch_panel(req: &Request, store: &Store, actor: &str, net: &NetInfo) -> ApiR
                 "listen": panel.listen,
                 "remote_enabled": panel.remote_access.enabled,
                 "trusted_proxies": panel.remote_access.trusted_proxies,
+                "tls_enabled": panel.tls.enabled,
+                "plain_policy": panel.tls.plain_policy,
+                "tls_cert": panel.tls.cert,
                 "ip": net.client_ip,
                 "peer_ip": req.peer_ip,
             }),
@@ -801,6 +1064,13 @@ fn patch_panel(req: &Request, store: &Store, actor: &str, net: &NetInfo) -> ApiR
             "listen": panel.listen,
             "listen_effective": effective,
             "restart_required": listen_changed || changed,
+            "tls": {
+                "enabled": panel.tls.enabled,
+                "cert_path": panel.tls.cert,
+                "key_path": panel.tls.key,
+                "plain_policy": panel.tls.plain_policy,
+                "restart_required": tls_changed || listen_changed,
+            },
             "update": {
                 "feed": panel.update.feed,
                 "mirror": panel.update.mirror,

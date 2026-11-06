@@ -288,6 +288,7 @@
     $('#wizard-back').addEventListener('click', function () { wizardGo(-1); });
     $('#wizard-commit').addEventListener('click', function () { if (wizardStep >= 6) commitWizard(); else wizardGo(1); });
     $('#panel-save').addEventListener('click', savePanelConfig);
+    $('#tls-generate').addEventListener('click', generateTlsCert);
     $('#wz-protocol').addEventListener('change', updateWizardFields);
     $('#wz-port').addEventListener('input', updateWizardFields);
 
@@ -1410,6 +1411,52 @@
     var auth = UI.panel.auth || {};
     var foot = $('#auth-foot');
     if (foot && auth.password_storage) foot.textContent = auth.password_storage + '；Cookie ' + (auth.cookie || 'HttpOnly') + '。';
+    renderTls();
+  }
+
+  /* ---------------- 内置 TLS ---------------- */
+  function renderTls() {
+    var t = (UI.panel && UI.panel.tls) || {};
+    if ($('#tls-enabled')) $('#tls-enabled').value = t.configured ? 'on' : 'off';
+    if ($('#plain-policy')) $('#plain-policy').value = t.plain_policy || 'warn';
+    if ($('#tls-cert')) $('#tls-cert').value = t.cert_path || '';
+    if ($('#tls-key')) $('#tls-key').value = t.key_path || '';
+    var info = $('#tls-info');
+    var cert = t.cert;
+    if (info) {
+      if (t.active && cert) {
+        info.textContent = 'HTTPS 生效 · SHA256 ' + cert.fingerprint + ' · 到期 ' + cert.not_after +
+          '（剩余 ' + cert.days_left + ' 天）· SAN ' + (cert.sans || []).join(', ');
+      } else if (t.configured) {
+        info.textContent = '已配置 TLS 但当前进程仍以明文运行，重启后生效。';
+      } else {
+        info.textContent = '当前明文 HTTP，策略 ' + (t.plain_policy || 'warn') + '；登录凭据未加密传输。';
+      }
+    }
+    var banner = document.getElementById('tls-banner');
+    if (!t.active) {
+      if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'tls-banner';
+        banner.style.cssText = 'position:sticky;top:0;z-index:60;padding:8px 14px;font-size:12.5px;' +
+          'background:#fff3cd;color:#7a4b00;border-bottom:1px solid #e6c66a;';
+        document.body.insertBefore(banner, document.body.firstChild);
+      }
+      banner.textContent = '⚠ 当前通过明文 HTTP 提供服务（plain_policy=' + (t.plain_policy || 'warn') +
+        '），登录凭据未加密。建议在「设置 → 访问与 TLS」启用内置 TLS。';
+      banner.style.display = '';
+    } else if (banner) {
+      banner.style.display = 'none';
+    }
+  }
+  function generateTlsCert() {
+    api('/api/tls/generate', { method: 'POST', body: '{}' }).then(function (r) {
+      toast('已生成自签证书', '指纹 ' + r.cert.fingerprint + '，到期 ' + r.cert.not_after + '；启用 TLS 并重启后生效');
+      loadAll();
+    }).catch(function (e) {
+      var extra = (e.fields || []).map(function (f) { return f.field + '：' + f.message; }).join(' · ');
+      toast('生成失败', e.message + (extra ? ' · ' + extra : ''));
+    });
   }
   /* ---------------- 软件更新 ---------------- */
   function fmtPct(n) {
@@ -1652,7 +1699,11 @@
     var body = {
       panel_address: ($('#panel-address-input') || {}).value.trim(),
       listen: listenHost + ':' + port,
-      trusted_proxies: String(($('#trusted-proxies') || {}).value || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean)
+      trusted_proxies: String(($('#trusted-proxies') || {}).value || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+      tls_enabled: (($('#tls-enabled') || {}).value) === 'on',
+      tls_cert: (($('#tls-cert') || {}).value || '').trim(),
+      tls_key: (($('#tls-key') || {}).value || '').trim(),
+      plain_policy: (($('#plain-policy') || {}).value) || 'warn'
     };
     var wantRemote = !stateListenIsLoopback(listenHost);
     if (wantRemote) {
@@ -1670,8 +1721,9 @@
       UI.panel.listen = r.listen;
       UI.panel.listen_effective = r.listen_effective;
       UI.panel.remote_access = Object.assign({}, UI.panel.remote_access || {}, r.remote_access);
+      if (r.tls) UI.panel.tls = Object.assign({}, UI.panel.tls || {}, r.tls, { cert: (UI.panel.tls || {}).cert });
       renderSettings();
-      toast('设置已保存', r.note || '重启面板后监听变更生效');
+      toast('设置已保存', r.tls && r.tls.restart_required ? 'TLS/监听变更需重启面板生效' : (r.note || '重启面板后监听变更生效'));
       schedulePreview();
     }).catch(function (e) {
       var extra = (e.fields || []).map(function (f) { return f.field + '：' + f.message; }).join(' · ');
