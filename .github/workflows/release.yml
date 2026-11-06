@@ -33,7 +33,9 @@ jobs:
           set -eu
           # 在 Debian 12 容器里构建：宿主 runner 是 Ubuntu 24.04（glibc 2.39），
           # 直接构建出的二进制在 Debian 12 / Ubuntu 22.04 上会缺 GLIBC_2.39。
-          docker run --rm -v "$PWD:/src" -w /src debian:bookworm bash -c '
+          # 容器以 root 写入独立 target 目录，避免污染宿主 target/ 导致后续
+          # 交叉编译无法获取 .cargo-build-lock。
+          docker run --rm -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/src/target-linux debian:bookworm bash -c '
             set -eu
             apt-get update
             apt-get install -y --no-install-recommends build-essential ca-certificates curl
@@ -43,10 +45,10 @@ jobs:
           '
 
       - name: 校验二进制内版本
-        run: bash scripts/check-version.sh --tag "$GITHUB_REF_NAME" --binary ./target/release/berthio
+        run: bash scripts/check-version.sh --tag "$GITHUB_REF_NAME" --binary ./target-linux/release/berthio
 
-      - name: 交叉编译 Windows 二进制（失败不阻断发布）
-        continue-on-error: true
+      - name: 交叉编译 Windows 二进制
+        timeout-minutes: 20
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-x86-64
@@ -68,12 +70,12 @@ jobs:
           test -f "$DEMO" || { echo "缺少 demo 附件: $DEMO"; exit 1; }
 
           mkdir -p dist
-          cp target/release/berthio "dist/berthio-${TAG}-linux-x86_64"
-          if [ -f target/x86_64-pc-windows-gnu/release/berthio.exe ]; then
-            cp target/x86_64-pc-windows-gnu/release/berthio.exe "dist/berthio-${TAG}-windows-x86_64.exe"
-          else
-            echo "::warning::Windows 交叉编译未产出，附件只有 Linux 二进制"
-          fi
+          cp target-linux/release/berthio "dist/berthio-${TAG}-linux-x86_64"
+          test -f target/x86_64-pc-windows-gnu/release/berthio.exe || {
+            echo "缺少 Windows 二进制: target/x86_64-pc-windows-gnu/release/berthio.exe"
+            exit 1
+          }
+          cp target/x86_64-pc-windows-gnu/release/berthio.exe "dist/berthio-${TAG}-windows-x86_64.exe"
           if [ -n "$DEMO" ]; then
             cp "$DEMO" "dist/berthio-${TAG}-demo-$(basename "$(dirname "$DEMO")").html"
           fi
