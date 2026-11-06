@@ -99,4 +99,4 @@ Go `tools/pathguard`：
 - 拒绝用例 10 项：空串、`C:\Users\Tyler Zhang`、`C:\`、`$env:USERPROFILE`、`..\..\Users\Tyler Zhang`、`%TEMP%`、含 `$VAR`、用户主目录本身、主目录祖先、主目录内部；
 - 放行 / dry-run / 清单落盘 / `-Apply` / 拒绝允许根本身均通过。
 
-Rust `src/safety.rs`：单元测试覆盖空路径、文件系统根、主目录及祖先、未展开变量、允许根本身被拒；临时目录子项放行并删除。
+Rust `src/safety.rs`：单元测试覆盖空路径、文件系统根、主目录及祖先、未展开变量、允许根本身被拒；临时目录子项放行并删除。测试根优先读 `BERTHIO_TEST_ROOT`（本机验收显式指到 `D:\...\cargo-tmp`），未设置时退回系统临时目录。

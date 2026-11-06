@@ -214,9 +214,17 @@ mod tests {
 
     static SEQ: AtomicUsize = AtomicUsize::new(0);
 
+    /// 测试根优先取 `BERTHIO_TEST_ROOT`（本机验收显式指到 D: 盘），未设置时退回系统临时目录。
+    fn test_root() -> PathBuf {
+        std::env::var_os("BERTHIO_TEST_ROOT")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
     fn temp_child(tag: &str) -> PathBuf {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
-        std::env::temp_dir().join(format!(
+        test_root().join(format!(
             "berthio-safety-{}-{}-{}",
             std::process::id(),
             tag,
@@ -226,7 +234,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_root_home_and_variables() {
-        let root = std::env::temp_dir();
+        let root = test_root();
         assert!(check_delete(Path::new(""), &[root.clone()]).is_err());
         assert!(check_delete(Path::new("$HOME/x"), &[root.clone()]).is_err());
         assert!(check_delete(Path::new("%TEMP%/x"), &[root.clone()]).is_err());
@@ -245,7 +253,7 @@ mod tests {
 
     #[test]
     fn allows_and_removes_temp_child() {
-        let root = std::env::temp_dir();
+        let root = test_root();
         let dir = temp_child("ok");
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub/a.txt"), b"x").unwrap();
