@@ -1,10 +1,13 @@
 use crate::state::Store;
 use crate::util;
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 const KERNELS: [&str; 3] = ["xray", "sing-box", "mihomo"];
 
+#[derive(Clone)]
 pub struct BinaryInfo {
     pub name: String,
     pub present: bool,
@@ -14,6 +17,25 @@ pub struct BinaryInfo {
     pub probe_command: String,
     pub probe_ok: bool,
     pub probe_output: String,
+}
+
+type Stamp = (u64, u64);
+
+fn cache() -> &'static Mutex<HashMap<PathBuf, (Stamp, BinaryInfo)>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (Stamp, BinaryInfo)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 二进制指纹（mtime 秒 + 文件长度），用于缓存失效。
+fn stamp_of(path: &Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Some((mtime, meta.len()))
 }
 
 fn exe_name(name: &str) -> String {
@@ -77,10 +99,23 @@ fn probe_args(name: &str) -> Vec<&'static str> {
 
 pub fn detect(store: &Store, name: &str) -> BinaryInfo {
     let path = find_in_path(name).or_else(|| find_in_home(store, name));
-    let (present, path_str, version, sha, ok, output) = match path {
+    let (present, path_str, version, sha, ok, output) = match &path {
         Some(p) => {
+            // 探测要执行 --version 并对整份二进制做 SHA-256（约 60–80 MB），
+            // 每次 /api/kernels 都重算会让请求耗时 20s+；按 mtime+长度缓存。
+            let stamp = stamp_of(p);
+            if let Some(stamp) = stamp {
+                if let Some((cached_stamp, info)) = cache().lock().unwrap().get(p) {
+                    if *cached_stamp == stamp {
+                        return info.clone();
+                    }
+                }
+            }
             let args = probe_args(name);
-            let output = Command::new(&p).args(&args).output();
+            let output = Command::new(p)
+                .args(&args)
+                .creation_flags_no_window()
+                .output();
             let (ok, combined, version) = match output {
                 Ok(o) => {
                     let text = format!(
@@ -94,17 +129,23 @@ pub fn detect(store: &Store, name: &str) -> BinaryInfo {
                 }
                 Err(e) => (false, format!("执行失败: {e}"), String::new()),
             };
-            let sha = std::fs::read(&p)
+            let sha = std::fs::read(p)
                 .map(|b| util::sha256_hex(&b))
                 .unwrap_or_else(|_| String::new());
-            (
-                true,
-                p.display().to_string(),
+            let info = BinaryInfo {
+                name: name.to_string(),
+                present: true,
+                path: p.display().to_string(),
                 version,
-                sha,
-                ok,
-                truncate(&combined, 240),
-            )
+                sha256: sha,
+                probe_command: format!("{} {}", name, probe_args(name).join(" ")),
+                probe_ok: ok,
+                probe_output: truncate(&combined, 240),
+            };
+            if let Some(stamp) = stamp {
+                cache().lock().unwrap().insert(p.clone(), (stamp, info.clone()));
+            }
+            return info;
         }
         None => (
             false,
@@ -124,6 +165,21 @@ pub fn detect(store: &Store, name: &str) -> BinaryInfo {
         probe_command: format!("{} {}", name, probe_args(name).join(" ")),
         probe_ok: ok,
         probe_output: output,
+    }
+}
+
+trait NoWindow {
+    fn creation_flags_no_window(&mut self) -> &mut Self;
+}
+
+impl NoWindow for Command {
+    fn creation_flags_no_window(&mut self) -> &mut Self {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            self.creation_flags(0x08000000);
+        }
+        self
     }
 }
 
@@ -189,10 +245,10 @@ pub fn matrix() -> serde_json::Value {
         {
             "id": "xhttp",
             "label": "XHTTP 传输",
-            "xray": "配置可渲染；未真机验证",
-            "sing-box": "未验证",
-            "mihomo": "客户端 mihomo -t 接受 network: xhttp；真机导入未验证",
-            "status": "未验证"
+            "xray": "支持：25.6.8 客户端真实连接成功（TLS + xhttp）",
+            "sing-box": "不支持：1.14.4 check 直接报 unknown transport type: xhttp",
+            "mihomo": "不支持：1.19.33 -t 能过，但真实连接失败（服务端 TLS handshake EOF、客户端空响应）",
+            "status": "已实测（2026-11-06）"
         },
         {
             "id": "anytls",

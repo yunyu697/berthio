@@ -50,7 +50,6 @@ impl Snapshot {
             "wal_bytes": self.wal_bytes,
             "shm_present": self.shm_present,
             "snapshot_strategy": self.strategy,
-            "snapshot_path": self.path.display().to_string(),
             "snapshot_integrity": self.integrity,
             "consistency": self.consistency,
         })
@@ -105,6 +104,9 @@ struct TrafficRow {
 struct Item {
     kind: &'static str,
     source_id: i64,
+    /// JSON 路径下的原始顺序（从 1 开始）；数据库路径为 0。
+    position: usize,
+    source_ref: String,
     remark: String,
     protocol: String,
     port: i64,
@@ -124,6 +126,8 @@ impl Item {
         json!({
             "kind": self.kind,
             "source_id": self.source_id,
+            "position": self.position,
+            "source_ref": self.source_ref,
             "remark": self.remark,
             "protocol": self.protocol,
             "port": self.port,
@@ -140,8 +144,9 @@ impl Item {
 }
 
 struct Plan {
-    snapshot: Snapshot,
-    schema: SchemaInfo,
+    source_kind: &'static str,
+    source_json: Value,
+    schema_json: Value,
     items: Vec<Item>,
     plan_hash: String,
     preview_id: String,
@@ -426,7 +431,21 @@ fn probe(conn: &Connection) -> ApiResult<SchemaInfo> {
     }
     if flavor == "3x-ui v3.x" {
         notes.push(
-            "3x-ui v3 的 inbounds 新增 exclude_from_sub / node_id / share_addr 等列；本工具只读取迁移需要的列，其余忽略。"
+            "3x-ui v3 实测（v3.11.0）：inbounds 新增 exclude_from_sub / node_id / share_addr_strategy / share_addr / disable_flow / origin_node_guid 等列；迁移只读需要的列。"
+                .to_string(),
+        );
+        if tables.iter().any(|t| t == "clients") && tables.iter().any(|t| t == "client_inbounds") {
+            notes.push(
+                "3x-ui v3 的客户端是全局表 clients + client_inbounds（同一 email 可挂多个入站）；settings.clients 仍保留导出快照。本工具优先用 settings.clients，缺失时回退查全局表。"
+                    .to_string(),
+            );
+        }
+        notes.push(
+            "3x-ui v3 的 client_traffics 带 inbound_id 且没有 all_time 列；已按 (inbound_id, email) 关联流量，避免多入站共享客户端时串流量。"
+                .to_string(),
+        );
+        notes.push(
+            "3x-ui v3 的 inbounds.port 带唯一索引（实测同端口第二条被面板拒绝）；v2/旧版行为不同，迁移仍会做端口冲突检查。"
                 .to_string(),
         );
     }
@@ -471,12 +490,73 @@ fn load_rows(conn: &Connection) -> ApiResult<Vec<SourceRow>> {
     Ok(out)
 }
 
+fn augment_v3_clients(conn: &Connection, schema: &SchemaInfo, rows: &mut [SourceRow]) -> ApiResult<()> {
+    if !schema.tables.iter().any(|t| t == "clients")
+        || !schema.tables.iter().any(|t| t == "client_inbounds")
+    {
+        return Ok(());
+    }
+    let mut stmt = match conn.prepare(
+        "SELECT COALESCE(c.email,''), COALESCE(c.uuid,''), COALESCE(c.flow,''), COALESCE(c.limit_ip,0), COALESCE(c.total_gb,0), COALESCE(c.expiry_time,0), COALESCE(c.enable,1) FROM clients c JOIN client_inbounds ci ON ci.client_id=c.id WHERE ci.inbound_id=?1 ORDER BY c.email",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+    for row in rows.iter_mut() {
+        if row.protocol.to_ascii_lowercase() != "vless" {
+            continue;
+        }
+        let mut settings: Value = match serde_json::from_str(&row.settings) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let has_clients = settings
+            .get("clients")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        if has_clients {
+            continue;
+        }
+        let mapped = stmt
+            .query_map([row.id], |r| {
+                Ok(json!({
+                    "email": r.get::<_, String>(0)?,
+                    "id": r.get::<_, String>(1)?,
+                    "flow": r.get::<_, String>(2)?,
+                    "limitIp": r.get::<_, i64>(3)?,
+                    "totalGB": r.get::<_, i64>(4)?,
+                    "expiryTime": r.get::<_, i64>(5)?,
+                    "enable": r.get::<_, i64>(6)? != 0,
+                }))
+            })
+            .map_err(|e| ApiError::internal(format!("读取 v3 clients 失败: {e}")))?;
+        let clients: Vec<Value> = mapped.filter_map(|r| r.ok()).collect();
+        if !clients.is_empty() {
+            if let Some(obj) = settings.as_object_mut() {
+                obj.insert("clients".to_string(), json!(clients));
+                row.settings = settings.to_string();
+            }
+        }
+    }
+    Ok(())
+}
+
 fn load_traffic(conn: &Connection, schema: &SchemaInfo) -> ApiResult<HashMap<String, TrafficRow>> {
     let mut out = HashMap::new();
     if !schema.has_client_traffics {
         return Ok(out);
     }
-    let mut stmt = match conn.prepare("SELECT email, up, down, total FROM client_traffics") {
+    // v3 的 client_traffics 带 inbound_id；v2/旧版没有。带 inbound_id 时按 (入站, email) 建键，
+    // 避免同一全局客户端挂在多个入站时只取到最后一条流量。
+    let cols = table_columns(conn, "client_traffics").unwrap_or_default();
+    let has_inbound = cols.iter().any(|c| c == "inbound_id");
+    let sql = if has_inbound {
+        "SELECT email, up, down, total, inbound_id FROM client_traffics"
+    } else {
+        "SELECT email, up, down, total, NULL FROM client_traffics"
+    };
+    let mut stmt = match conn.prepare(sql) {
         Ok(s) => s,
         Err(_) => return Ok(out),
     };
@@ -489,13 +569,18 @@ fn load_traffic(conn: &Connection, schema: &SchemaInfo) -> ApiResult<HashMap<Str
                     down: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
                     total: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
                 },
+                r.get::<_, Option<i64>>(4)?.unwrap_or(0),
             ))
         })
         .map_err(|e| ApiError::internal(format!("读取 client_traffics 失败: {e}")))?;
     for r in rows {
-        let (email, t) = r.map_err(|e| ApiError::internal(e.to_string()))?;
+        let (email, t, inbound_id) = r.map_err(|e| ApiError::internal(e.to_string()))?;
         if !email.is_empty() {
-            out.insert(email.to_ascii_lowercase(), t);
+            let key = email.to_ascii_lowercase();
+            if has_inbound {
+                out.insert(format!("{inbound_id}:{key}"), t.clone());
+            }
+            out.insert(key, t);
         }
     }
     Ok(out)
@@ -505,7 +590,7 @@ fn parse_json(raw: &str, what: &str) -> Result<Value, String> {
     if raw.trim().is_empty() {
         return Ok(json!({}));
     }
-    serde_json::from_str(raw).map_err(|e| format!("{what} 不是合法 JSON: {e}"))
+    serde_json::from_str(raw).map_err(|e| format!("{what} 不是合法 JSON（{}）", escape_rel(&e)))
 }
 
 fn stable_id(prefix: &str, seed: &str) -> String {
@@ -544,6 +629,8 @@ fn base_item(row: &SourceRow) -> Item {
     Item {
         kind: "skip",
         source_id: row.id,
+        position: 0,
+        source_ref: String::new(),
         remark: row.remark.clone(),
         protocol: row.protocol.clone(),
         port: row.port,
@@ -572,23 +659,48 @@ fn build_candidate(
     row: &SourceRow,
     traffic: &HashMap<String, TrafficRow>,
     source_prefix: &str,
+    json_mode: bool,
+    traffic_known: bool,
     now: &str,
 ) -> Candidate {
     let mut item = base_item(row);
     let settings = match parse_json(&row.settings, "settings") {
         Ok(v) => v,
         Err(e) => {
-            item.reasons.push(e);
+            item.kind = "conflict";
+            item.reasons.push(format!(
+                "字段 settings 解析失败：{e}；原文片段：{}",
+                snippet(&row.settings)
+            ));
+            item.suggestion = "把 settings 修成合法 JSON（字符串或对象均可）后重新预览".to_string();
             return Candidate { item };
         }
     };
     let stream = match parse_json(&row.stream_settings, "stream_settings") {
         Ok(v) => v,
         Err(e) => {
-            item.reasons.push(e);
+            item.kind = "conflict";
+            item.reasons.push(format!(
+                "字段 streamSettings 解析失败：{e}；原文片段：{}",
+                snippet(&row.stream_settings)
+            ));
+            item.suggestion = "把 streamSettings 修成合法 JSON（字符串或对象均可）后重新预览".to_string();
             return Candidate { item };
         }
     };
+
+    if row.protocol.trim().is_empty() {
+        item.kind = "conflict";
+        item.reasons.push("字段 protocol 缺失或为空".to_string());
+        item.suggestion = "补上 protocol（3x-ui 入站必填）后重新预览".to_string();
+        return Candidate { item };
+    }
+    if row.settings.trim().is_empty() || row.settings.trim() == "{}" {
+        item.kind = "conflict";
+        item.reasons.push("字段 settings 缺失或为空，无法读取 clients".to_string());
+        item.suggestion = "补上 settings（至少包含 clients 数组）后重新预览".to_string();
+        return Candidate { item };
+    }
 
     let protocol = row.protocol.to_ascii_lowercase();
     if protocol != "vless" {
@@ -642,8 +754,14 @@ fn build_candidate(
         }
     }
     if network == "xhttp" {
-        item.warnings
-            .push("xhttp 传输：目标客户端支持情况未验证（与 M1 的风险标记一致）".to_string());
+        // 实测（1.0.0）：xray 25.6.8 客户端可连；sing-box 1.14.4 直接拒绝 xhttp transport；
+        // mihomo 1.19.33 的 -t 能过但真实连接失败（服务端 TLS handshake EOF / 客户端空响应）。
+        // 订阅只输出 mihomo / sing-box，导入 xhttp 只会产生不可用订阅，故跳过而不是带警告导入。
+        item.reasons.push(
+            "xhttp 传输：xray 客户端可用，但 sing-box 1.14.4 拒绝（unknown transport type: xhttp），mihomo 1.19.33 配置自检通过却真实连接失败；Berthio 订阅只输出 mihomo/sing-box，本条跳过"
+                .to_string(),
+        );
+        return Candidate { item };
     }
 
     let security = {
@@ -823,7 +941,9 @@ fn build_candidate(
             client_conflict = true;
             break;
         }
-        let t = traffic.get(&email.to_ascii_lowercase());
+        let t = traffic
+            .get(&format!("{}:{}", row.id, email.to_ascii_lowercase()))
+            .or_else(|| traffic.get(&email.to_ascii_lowercase()));
         let used = t.map(|x| x.up.max(0) + x.down.max(0)).unwrap_or(0);
         let quota_from_settings = i64_field(c, "totalGB").max(0);
         let quota = if quota_from_settings > 0 {
@@ -836,15 +956,20 @@ fn build_candidate(
         let expiry = ms_to_iso(i64_field(c, "expiryTime"));
         let enabled = bool_field(c, "enable", true);
         let mut warnings = Vec::new();
-        if t.is_none() {
+        if traffic_known && t.is_none() {
             warnings.push("没有 client_traffics 行：已用流量按 0 处理（旧版 x-ui 无该表）".to_string());
         }
         if i64_field(c, "totalGB") < 0 {
             warnings.push("totalGB 为负数（3x-ui 里表示“剩余 N 天”或无限），本次按 0 处理".to_string());
         }
         item.warnings.extend(warnings);
+        let client_seed = if json_mode {
+            format!("json:{}:{}:{}", row.remark.trim(), row.port, email)
+        } else {
+            format!("{source_prefix}:{}:{email}", row.id)
+        };
         clients.push(Client {
-            id: stable_id("cli", &format!("{source_prefix}:{}:{email}", row.id)),
+            id: stable_id("cli", &client_seed),
             email: email.clone(),
             uuid,
             password: String::new(),
@@ -881,7 +1006,24 @@ fn build_candidate(
     } else {
         row.listen.trim().to_string()
     };
-    let source_ref = format!("3xui:{source_prefix}:{}", row.id);
+    let source_ref = if json_mode {
+        // JSON 路径按 remark / 端口 / 客户端 UUID 判定幂等（与用户要求一致），
+        // 同一份内容重复粘贴（顺序变化也可）不会产生重复入站。
+        let seed = format!(
+            "{}|{}|{}",
+            row.remark.trim(),
+            row.port,
+            clients.iter().map(|c| c.uuid.as_str()).collect::<Vec<_>>().join(",")
+        );
+        format!("3xui-json:{}", &util::sha256_hex(seed.as_bytes())[..16])
+    } else {
+        format!("3xui:{source_prefix}:{}", row.id)
+    };
+    if json_mode {
+        item.warnings.push(
+            "JSON 入站导出不含客户端已用流量统计，已用流量按 0；订阅/配额以 Berthio 状态为准".to_string(),
+        );
+    }
 
     let inbound = Inbound {
         id: stable_id("inb", &source_ref),
@@ -944,10 +1086,11 @@ fn build_candidate(
     item.warnings.push(
         "客户端流量统计是快照，不随 3x-ui 后续变化同步；在线状态不迁移".to_string(),
     );
+    item.source_ref = source_ref.clone();
     item.signature = {
         let mut parts = vec![
             "import".to_string(),
-            row.id.to_string(),
+            item.source_ref.clone(),
             inbound.tag.clone(),
             inbound.listen.clone(),
             inbound.port.to_string(),
@@ -976,24 +1119,20 @@ fn build_candidate(
     Candidate { item }
 }
 
-fn build_plan(store: &Store, db_path: &str) -> ApiResult<Plan> {
-    if db_path.trim().is_empty() {
-        return Err(ApiError::bad_request("缺少 db_path（指向 3x-ui 的 x-ui.db）"));
-    }
-    let src = PathBuf::from(db_path.trim());
-    let canonical = fs::canonicalize(&src)
-        .map_err(|e| ApiError::bad_request(format!("无法定位数据库 {}: {e}", src.display())))?;
-    let snapshot = take_snapshot(store, &canonical)?;
-    let conn = Connection::open_with_flags(&snapshot.path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| ApiError::internal(format!("只读打开快照失败: {e}")))?;
-    let schema = probe(&conn)?;
-    let rows = load_rows(&conn)?;
-    let traffic = load_traffic(&conn, &schema)?;
-    drop(conn);
-
+fn assemble_plan(
+    store: &Store,
+    rows: &[SourceRow],
+    traffic: &HashMap<String, TrafficRow>,
+    source_prefix: &str,
+    source_kind: &'static str,
+    source_json: Value,
+    schema_json: Value,
+    header: Vec<String>,
+    json_mode: bool,
+    traffic_known: bool,
+) -> Plan {
     let state = store.snapshot();
     let now = util::now_iso();
-    let source_prefix = util::sha256_hex(canonical.to_string_lossy().as_bytes())[0..12].to_string();
 
     let existing_refs: HashSet<String> = state.inbounds.iter().map(|i| i.source_ref.clone()).collect();
     let existing_tags: HashSet<String> = state
@@ -1011,10 +1150,11 @@ fn build_plan(store: &Store, db_path: &str) -> ApiResult<Plan> {
     let mut items: Vec<Item> = Vec::new();
     let mut accepted_ports: HashMap<u16, i64> = HashMap::new();
     let mut accepted_tags: HashSet<String> = HashSet::new();
+    let mut accepted_refs: HashMap<String, i64> = HashMap::new();
 
-    for row in &rows {
-        let mut cand = build_candidate(row, &traffic, &source_prefix, &now).item;
-        let source_ref = format!("3xui:{source_prefix}:{}", row.id);
+    for row in rows {
+        let mut cand = build_candidate(row, traffic, source_prefix, json_mode, traffic_known, &now).item;
+        let source_ref = cand.source_ref.clone();
         if cand.kind == "import" {
             if existing_refs.contains(&source_ref) {
                 cand.kind = "skip";
@@ -1023,13 +1163,13 @@ fn build_plan(store: &Store, db_path: &str) -> ApiResult<Plan> {
                 cand.reasons.push(format!(
                     "已导入（source_ref={source_ref} 命中），幂等跳过；不会覆盖已有入站"
                 ));
-                cand.signature = format!("already|{}", row.id);
+                cand.signature = format!("already|{source_ref}");
             } else if existing_tags.contains(&cand.tag) {
                 cand.kind = "conflict";
                 cand.reasons.push(format!("tag {} 已被 Berthio 现有入站占用", cand.tag));
                 cand.suggestion = "改源库 tag（或导入后手工改 tag）后重新预览".to_string();
                 cand.mapped = None;
-                cand.signature = format!("conflict-tag|{}|{}", row.id, cand.tag);
+                cand.signature = format!("conflict-tag|{source_ref}|{}", cand.tag);
             } else if let Some(who) = existing_ports
                 .get(&(row.port as u16))
                 .map(|remark| format!("现有入站「{remark}」"))
@@ -1045,53 +1185,341 @@ fn build_plan(store: &Store, db_path: &str) -> ApiResult<Plan> {
                 cand.suggestion =
                     "改源库端口或先在 Berthio 停用/删除冲突入站，再重新预览".to_string();
                 cand.mapped = None;
-                cand.signature = format!("conflict-port|{}|{}", row.id, row.port);
+                cand.signature = format!("conflict-port|{source_ref}|{}", row.port);
             } else if accepted_tags.contains(&cand.tag) {
                 cand.kind = "conflict";
                 cand.reasons.push(format!("tag {} 在本次预览内重复", cand.tag));
                 cand.suggestion = "去重后再迁移".to_string();
                 cand.mapped = None;
-                cand.signature = format!("conflict-tag-dup|{}", row.id);
+                cand.signature = format!("conflict-tag-dup|{source_ref}");
+            } else if let Some(first) = accepted_refs.get(&source_ref) {
+                cand.kind = "conflict";
+                cand.reasons.push(format!(
+                    "与本次预览中的第 {first} 条重复（remark / 端口 / 客户端 UUID 相同）"
+                ));
+                cand.suggestion = "删掉重复项后再导入".to_string();
+                cand.mapped = None;
+                cand.signature = format!("conflict-ref-dup|{source_ref}");
             } else {
                 accepted_ports.insert(row.port as u16, row.id);
                 accepted_tags.insert(cand.tag.clone());
+                accepted_refs.insert(source_ref.clone(), row.id);
             }
         }
         if cand.kind != "import" && cand.mapped.is_none() {
             cand.signature = format!(
                 "{}-{}|{}",
                 cand.kind,
-                row.id,
+                cand.source_ref,
                 cand.reasons.join(";")
             );
         }
         items.push(cand);
     }
 
-    let mut sig_parts = vec![
-        format!("prefix={source_prefix}"),
-        format!("flavor={}", schema.flavor),
-        format!("rows={}", rows.len()),
-    ];
+    let mut sig_parts = header;
     for i in &items {
         sig_parts.push(i.signature.clone());
     }
     let plan_hash = util::sha256_hex(sig_parts.join("\n").as_bytes());
     let preview_id = format!("mig_{}", &plan_hash[0..12]);
 
-    Ok(Plan {
-        snapshot,
-        schema,
+    Plan {
+        source_kind,
+        source_json,
+        schema_json,
         items,
         plan_hash,
         preview_id,
-        source_prefix,
-    })
+        source_prefix: source_prefix.to_string(),
+    }
+}
+
+fn build_plan_db(store: &Store, db_path: &str) -> ApiResult<Plan> {
+    if db_path.trim().is_empty() {
+        return Err(ApiError::bad_request("缺少 db_path（指向 3x-ui 的 x-ui.db）"));
+    }
+    let src = PathBuf::from(db_path.trim());
+    let canonical = fs::canonicalize(&src)
+        .map_err(|e| ApiError::bad_request(format!("无法定位数据库 {}: {e}", src.display())))?;
+    let snapshot = take_snapshot(store, &canonical)?;
+    let read = read_snapshot(&snapshot.path);
+    // 快照里是整库副本（含私钥），读完立即删除，不留在 tmp/。
+    let _ = fs::remove_dir_all(&snapshot.work);
+    let (schema, rows, traffic) = read?;
+
+    let source_prefix =
+        util::sha256_hex(canonical.to_string_lossy().as_bytes())[0..12].to_string();
+    let mut source_json = snapshot.json();
+    source_json["kind"] = json!("sqlite_snapshot");
+    let header = vec![
+        format!("prefix={source_prefix}"),
+        format!("flavor={}", schema.flavor),
+        format!("rows={}", rows.len()),
+    ];
+    let schema_json = schema.json();
+
+    Ok(assemble_plan(
+        store,
+        &rows,
+        &traffic,
+        &source_prefix,
+        "sqlite_snapshot",
+        source_json,
+        schema_json,
+        header,
+        false,
+        true,
+    ))
+}
+
+fn read_snapshot(
+    path: &Path,
+) -> ApiResult<(SchemaInfo, Vec<SourceRow>, HashMap<String, TrafficRow>)> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| ApiError::internal(format!("只读打开快照失败: {e}")))?;
+    let schema = probe(&conn)?;
+    let mut rows = load_rows(&conn)?;
+    augment_v3_clients(&conn, &schema, &mut rows)?;
+    let traffic = load_traffic(&conn, &schema)?;
+    Ok((schema, rows, traffic))
+}
+
+fn redact_sensitive(raw: &str) -> String {
+    let mut s = raw.to_string();
+    for key in ["\"privateKey\"", "\"password\"", "\"private_key\""] {
+        let mut from = 0usize;
+        loop {
+            let Some(rel) = s[from..].find(key) else { break };
+            let pos = from + rel;
+            let Some(colon) = s[pos + key.len()..].find(':') else { break };
+            let value_start = pos + key.len() + colon + 1;
+            let rest = &s[value_start..];
+            let skip = rest.len() - rest.trim_start().len();
+            let start = value_start + skip;
+            let bytes: Vec<char> = s[start..].chars().collect();
+            if bytes.is_empty() {
+                break;
+            }
+            let end_rel = if bytes[0] == '"' {
+                let mut escaped = false;
+                let mut end = None;
+                for (i, ch) in bytes.iter().enumerate().skip(1) {
+                    if escaped {
+                        escaped = false;
+                    } else if *ch == '\\' {
+                        escaped = true;
+                    } else if *ch == '"' {
+                        end = Some(i + 1);
+                        break;
+                    }
+                }
+                end.unwrap_or(bytes.len())
+            } else {
+                bytes
+                    .iter()
+                    .position(|ch| *ch == ',' || *ch == '}' || *ch == '\n')
+                    .unwrap_or(bytes.len())
+            };
+            let end = start + s[start..].char_indices().nth(end_rel).map(|(i, _)| i).unwrap_or(s[start..].len());
+            s.replace_range(start..end, "\"***\"");
+            from = start + 5;
+        }
+    }
+    s
+}
+
+fn snippet(raw: &str) -> String {
+    let clean = redact_sensitive(raw);
+    let compact = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars: Vec<char> = compact.chars().collect();
+    if chars.len() <= 90 {
+        compact
+    } else {
+        format!("{}…", chars[..90].iter().collect::<String>())
+    }
+}
+
+fn escape_rel(e: &serde_json::Error) -> String {
+    format!("第 {} 行第 {} 列：{}", e.line(), e.column(), e)
+}
+
+fn normalize_json_field(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Object(_)) | Some(Value::Array(_)) => {
+            serde_json::to_string(v.unwrap()).unwrap_or_default()
+        }
+        Some(Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn find_inbounds(v: &Value, depth: usize) -> Option<(Vec<Value>, String)> {
+    if depth > 4 {
+        return None;
+    }
+    if let Some(arr) = v.as_array() {
+        return Some((arr.clone(), "inbounds 数组".to_string()));
+    }
+    let obj = v.as_object()?;
+    if let Some(arr) = obj.get("inbounds").and_then(|x| x.as_array()) {
+        return Some((arr.clone(), "inbounds 数组".to_string()));
+    }
+    for key in ["xray", "obj", "data", "backup"] {
+        if let Some(inner) = obj.get(key) {
+            let parsed = if let Some(s) = inner.as_str() {
+                serde_json::from_str::<Value>(s).ok()
+            } else {
+                Some(inner.clone())
+            };
+            if let Some(inner_v) = parsed {
+                if let Some((items, shape)) = find_inbounds(&inner_v, depth + 1) {
+                    return Some((items, format!("{key}.{shape}")));
+                }
+            }
+        }
+    }
+    if obj.contains_key("protocol") && (obj.contains_key("settings") || obj.contains_key("streamSettings")) {
+        return Some((vec![v.clone()], "单条 inbound 对象".to_string()));
+    }
+    None
+}
+
+fn build_plan_json(store: &Store, text: &str, label: &str) -> ApiResult<Plan> {
+    const MAX_JSON: usize = 8 * 1024 * 1024;
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(ApiError::bad_request("json_text 为空：请粘贴 3x-ui 入站 JSON 或选择文件"));
+    }
+    if text.len() > MAX_JSON {
+        return Err(ApiError::new(
+            413,
+            "payload_too_large",
+            format!("JSON 超过 8 MB（实际 {} 字节）", text.len()),
+        ));
+    }
+    if !text.starts_with('{') && !text.starts_with('[') {
+        return Err(ApiError::bad_request(
+            "不是 JSON：内容需以 { 或 [ 开头（支持单条 inbound、inbounds 数组、3x-ui 备份 JSON）",
+        ));
+    }
+    let payload: Value = serde_json::from_str(text).map_err(|e| {
+        ApiError::bad_request(format!(
+            "JSON 解析失败（{}）；片段：{}",
+            escape_rel(&e),
+            snippet(text)
+        ))
+    })?;
+    let (values, shape) = find_inbounds(&payload, 0).ok_or_else(|| {
+        ApiError::bad_request(
+            "无法识别输入形态：支持单条 inbound 对象、inbounds 数组、3x-ui 备份 JSON（xray/inbounds 嵌套）、API 响应 obj 数组",
+        )
+    })?;
+
+    let mut rows: Vec<SourceRow> = Vec::with_capacity(values.len());
+    for (idx, v) in values.iter().enumerate() {
+        let pos = idx + 1;
+        let obj = v.as_object().ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "第 {pos} 条不是 JSON 对象（实际是 {}）；片段：{}",
+                match v {
+                    Value::Array(_) => "数组",
+                    Value::String(_) => "字符串",
+                    Value::Number(_) => "数字",
+                    Value::Bool(_) => "布尔",
+                    Value::Null => "null",
+                    _ => "未知",
+                },
+                snippet(&v.to_string())
+            ))
+        })?;
+        let settings = normalize_json_field(obj.get("settings"));
+        let stream = obj
+            .get("streamSettings")
+            .or_else(|| obj.get("stream_settings"))
+            .map(|x| normalize_json_field(Some(x)))
+            .unwrap_or_default();
+        let port = match obj.get("port") {
+            Some(Value::Number(n)) => n.as_i64().unwrap_or(0),
+            Some(Value::String(s)) => s.trim().parse::<i64>().unwrap_or(0),
+            _ => 0,
+        };
+        let enable = match obj.get("enable") {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::Number(n)) => n.as_i64().unwrap_or(0) != 0,
+            Some(Value::String(s)) => matches!(s.trim(), "true" | "1"),
+            None => true,
+            _ => true,
+        };
+        let id = obj.get("id").and_then(|x| x.as_i64()).unwrap_or(pos as i64);
+        rows.push(SourceRow {
+            id,
+            remark: normalize_json_field(obj.get("remark")),
+            enable,
+            listen: normalize_json_field(obj.get("listen")),
+            port,
+            protocol: normalize_json_field(obj.get("protocol")),
+            settings,
+            stream_settings: stream,
+            tag: normalize_json_field(obj.get("tag")),
+            up: obj.get("up").and_then(|x| x.as_i64()).unwrap_or(0),
+            down: obj.get("down").and_then(|x| x.as_i64()).unwrap_or(0),
+            total: obj.get("total").and_then(|x| x.as_i64()).unwrap_or(0),
+            expiry_time: obj.get("expiryTime").and_then(|x| x.as_i64()).unwrap_or(0),
+        });
+    }
+    if rows.is_empty() {
+        return Err(ApiError::bad_request("JSON 里没有可用入站（数组为空）"));
+    }
+
+    let sha = util::sha256_hex(text.as_bytes());
+    let source_json = json!({
+        "kind": "json",
+        "label": label,
+        "shape": shape,
+        "bytes": text.len(),
+        "sha256": sha,
+        "items": rows.len(),
+        "storage": "内存解析，未写临时文件；预览响应不返回原文与私钥明文",
+    });
+    let schema_json = json!({
+        "flavor": "3x-ui JSON 入站导出",
+        "shape": shape,
+        "notes": [
+            "settings / streamSettings 允许是对象，也允许是字符串化 JSON；两种都按同一映射器解析。",
+            "JSON 入站不带 client_traffics，已用流量按 0；其余字段与数据库路径共用映射。",
+            "JSON 路径不接触任何 3x-ui 数据库或面板，只解析提交内容。",
+        ],
+    });
+    let header = vec![
+        format!("json={sha}"),
+        format!("shape={shape}"),
+        format!("rows={}", rows.len()),
+    ];
+
+    let mut plan = assemble_plan(
+        store,
+        &rows,
+        &HashMap::new(),
+        "json",
+        "json",
+        source_json,
+        schema_json,
+        header,
+        true,
+        false,
+    );
+    // 让每一条都带“第几条”，错误定位不再依赖数组下标推断。
+    for (idx, item) in plan.items.iter_mut().enumerate() {
+        item.position = idx + 1;
+    }
+    Ok(plan)
 }
 
 fn mapping_notes() -> Vec<String> {
     vec![
-        "schema 来源：3x-ui v2.9.4 的 database/model/model.go 与 xray/client_traffic.go；旧版对照 vaxilu/x-ui 的 database/model/model.go。"
+        "schema 来源：3x-ui v3.11.0 / v2.9.4 的官方镜像与源码（v3 为全局 clients + client_inbounds、client_traffics 无 all_time）；旧版对照 vaxilu/x-ui 的 database/model/model.go。"
             .to_string(),
         "可继承：入站 remark/tag/listen/port/enabled，VLESS 的 network/security，客户端 uuid/email/flow/limitIp/配额/到期/启用，Reality 全套参数。"
             .to_string(),
@@ -1108,47 +1536,67 @@ fn mapping_notes() -> Vec<String> {
     ]
 }
 
-fn cleanup_old(store: &Store, keep: &Path) {
-    let root = store.home_path("tmp/migrate");
-    let Ok(entries) = fs::read_dir(&root) else { return };
-    for e in entries.flatten() {
-        let p = e.path();
-        if p != *keep {
-            let _ = fs::remove_dir_all(p);
-        }
+fn build_plan_any(
+    store: &Store,
+    db_path: &str,
+    json_text: &str,
+    label: &str,
+) -> ApiResult<Plan> {
+    if !db_path.trim().is_empty() {
+        build_plan_db(store, db_path)
+    } else if !json_text.trim().is_empty() {
+        build_plan_json(store, json_text, label)
+    } else {
+        Err(ApiError::bad_request(
+            "缺少输入：要么给 db_path（3x-ui 的 x-ui.db），要么给 json_text（粘贴/上传的入站 JSON）",
+        ))
     }
 }
 
-pub fn preview(store: &Store, db_path: &str) -> ApiResult<Value> {
-    let plan = build_plan(store, db_path)?;
+fn source_audit(plan: &Plan) -> Value {
+    json!({
+        "source_kind": plan.source_kind,
+        "source_sha256": plan.source_json.get("sha256").and_then(|v| v.as_str()).unwrap_or(""),
+        "source_bytes": plan.source_json.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+        "counts": plan.counts(),
+        "plan_hash": plan.plan_hash,
+    })
+}
+
+pub fn preview(store: &Store, db_path: &str, json_text: &str, label: &str) -> ApiResult<Value> {
+    let plan = build_plan_any(store, db_path, json_text, label)?;
+    let json_mode = plan.source_kind == "json";
     let out = json!({
         "preview_id": plan.preview_id,
         "plan_hash": plan.plan_hash,
         "source_prefix": plan.source_prefix,
-        "source": plan.snapshot.json(),
-        "schema": plan.schema.json(),
+        "source_kind": plan.source_kind,
+        "source": plan.source_json,
+        "schema": plan.schema_json,
         "counts": plan.counts(),
         "items": plan.items.iter().map(|i| i.json()).collect::<Vec<_>>(),
         "mapping_notes": mapping_notes(),
         "readonly_guarantee": {
-            "source_writes": "无：源库永不执行 UPDATE/INSERT/DELETE；带 -wal/-shm 时连只读连接都不打开，只拷贝文件。",
-            "snapshot": "快照只写入 Berthio 自己的 tmp/migrate/；源库 sha256 抓取前后对比见 source 字段。",
+            "source_writes": if json_mode {
+                "无：JSON 路径不接触任何数据库，也不写临时文件；只在内存中解析。"
+            } else {
+                "无：源库永不执行 UPDATE/INSERT/DELETE；带 -wal/-shm 时连只读连接都不打开，只拷贝文件。"
+            },
+            "snapshot": if json_mode {
+                "不生成快照；原始文本不落盘、不进日志，响应只返回 sha256 / 字节数与映射结果。"
+            } else {
+                "快照只写入 Berthio 自己的 tmp/migrate/，读完立即删除；源库 sha256 抓取前后对比见 source 字段。"
+            },
+            "secrets": "预览响应不含 privateKey / password 明文，只标注是否存在。",
             "apply_requires_confirmation": "apply 必须同时提交 preview_id + plan_hash + confirm=true；数据变化会 409。",
         },
-        "next": "确认 diff 后调用 POST /api/migrate/apply，body 带 db_path / preview_id / plan_hash / confirm=true",
+        "next": if json_mode {
+            "确认 diff 后调用 POST /api/migrate/apply，body 带 json_text / preview_id / plan_hash / confirm=true"
+        } else {
+            "确认 diff 后调用 POST /api/migrate/apply，body 带 db_path / preview_id / plan_hash / confirm=true"
+        },
     });
-    cleanup_old(store, &plan.snapshot.work);
-    store.audit(
-        "migrate.preview",
-        "local-admin",
-        json!({
-            "db_path": plan.snapshot.source_path.display().to_string(),
-            "source_sha256": plan.snapshot.source_sha256,
-            "snapshot_strategy": plan.snapshot.strategy,
-            "counts": plan.counts(),
-            "plan_hash": plan.plan_hash,
-        }),
-    );
+    store.audit("migrate.preview", "local-admin", source_audit(&plan));
     Ok(out)
 }
 
@@ -1156,6 +1604,8 @@ pub fn preview(store: &Store, db_path: &str) -> ApiResult<Value> {
 pub fn apply(
     store: &Store,
     db_path: &str,
+    json_text: &str,
+    label: &str,
     preview_id: &str,
     plan_hash: &str,
     confirm: bool,
@@ -1170,9 +1620,8 @@ pub fn apply(
             "apply 需要 preview_id 与 plan_hash（来自最近一次预览）",
         ));
     }
-    let plan = build_plan(store, db_path)?;
+    let plan = build_plan_any(store, db_path, json_text, label)?;
     if plan.preview_id != preview_id || plan.plan_hash != plan_hash {
-        cleanup_old(store, &plan.snapshot.work);
         store.audit(
             "migrate.apply.rejected",
             "local-admin",
@@ -1236,20 +1685,9 @@ pub fn apply(
     }
 
     let counts = plan.counts();
-    store.audit(
-        "migrate.apply",
-        "local-admin",
-        json!({
-            "db_path": plan.snapshot.source_path.display().to_string(),
-            "source_sha256": plan.snapshot.source_sha256,
-            "snapshot_strategy": plan.snapshot.strategy,
-            "plan_hash": plan.plan_hash,
-            "counts": counts,
-            "imported_ids": inserted,
-        }),
-    );
-    cleanup_old(store, &plan.snapshot.work);
-
+    let mut audit = source_audit(&plan);
+    audit["imported_ids"] = json!(inserted);
+    store.audit("migrate.apply", "local-admin", audit);
     Ok(json!({
         "ok": true,
         "preview_id": preview_id,
@@ -1258,7 +1696,11 @@ pub fn apply(
         "imported": inserted.len(),
         "already_imported_at_apply": skipped_existing,
         "inbound_ids": inserted,
-        "source": plan.snapshot.json(),
-        "note": "只写入 Berthio 自己的 state.json；源库未被修改。重复运行同一预览会幂等跳过。",
+        "source": plan.source_json,
+        "note": if plan.source_kind == "json" {
+            "只写入 Berthio 自己的 state.json；提交的 JSON 不落盘、不进日志。重复提交同一内容会按 remark/端口/uuid 幂等跳过。"
+        } else {
+            "只写入 Berthio 自己的 state.json；源库未被修改。重复运行同一预览会幂等跳过。"
+        },
     }))
 }

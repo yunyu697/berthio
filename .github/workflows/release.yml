@@ -46,13 +46,15 @@ jobs:
         run: |
           set -eu
           TAG="$GITHUB_REF_NAME"
-          SEQ="${TAG##*-alpha}"
-          if [ "$SEQ" = "$TAG" ]; then
-            echo "正式版不附带 alpha demo"; DEMO=""
-          else
+          if [ "${TAG##*-alpha}" != "$TAG" ]; then
+            SEQ="${TAG##*-alpha}"
             DEMO="demo/m${SEQ}/index.html"
-            test -f "$DEMO" || { echo "缺少该里程碑 demo: $DEMO"; exit 1; }
+          else
+            # 正式版：附最新里程碑 demo（demo 照旧，不因去掉 alpha 后缀而缺附件）
+            DEMO_DIR=$(ls -d demo/m* 2>/dev/null | sort -V | tail -1 || true)
+            DEMO="${DEMO_DIR}/index.html"
           fi
+          test -f "$DEMO" || { echo "缺少 demo 附件: $DEMO"; exit 1; }
 
           mkdir -p dist
           cp target/release/berthio "dist/berthio-${TAG}-linux-x86_64"
@@ -62,7 +64,7 @@ jobs:
             echo "::warning::Windows 交叉编译未产出，附件只有 Linux 二进制"
           fi
           if [ -n "$DEMO" ]; then
-            cp "$DEMO" "dist/berthio-${TAG}-demo-m${SEQ}.html"
+            cp "$DEMO" "dist/berthio-${TAG}-demo-$(basename "$(dirname "$DEMO")").html"
           fi
 
           cd dist

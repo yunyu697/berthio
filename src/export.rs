@@ -106,7 +106,18 @@ pub fn render(store: &Store, sel: Selection) -> ApiResult<Rendered> {
     let mut l0: Vec<Value> = Vec::new();
     let mut l1: Vec<Value> = Vec::new();
 
-    let entries = selected_entries(&state, &sel);
+    // xhttp 实测（1.0.0）：xray 25.6.8 客户端可连；sing-box 1.14.4 直接拒绝 xhttp transport；
+    // mihomo 1.19.33 的 -t 能过但真实连接失败。订阅只输出 mihomo / sing-box，因此运行期直接剔除，
+    // 避免下发「配置自检通过但连不上」的节点。
+    let mut entries = Vec::new();
+    let mut xhttp_skipped = Vec::new();
+    for (inbound, client) in selected_entries(&state, &sel) {
+        if inbound.network == "xhttp" {
+            xhttp_skipped.push(format!("{} / {}", inbound.remark, client.email));
+        } else {
+            entries.push((inbound, client));
+        }
+    }
     let rules = effective_rules(&sel);
     let catalog = rulesets::catalog();
 
@@ -116,8 +127,19 @@ pub fn render(store: &Store, sel: Selection) -> ApiResult<Rendered> {
     if sel.inbound_ids.is_empty() {
         l0.push(json!({"code":"no_inbound_selected","level":"fail","message":"未选择入站","fix":"在节点多选中至少选 1 个客户端"}));
     }
+    if !xhttp_skipped.is_empty() {
+        let detail = xhttp_skipped.join("、");
+        warnings.push(format!(
+            "已跳过 {} 个 xhttp 客户端（{detail}）：xray 客户端可用，但 sing-box 1.14.4 拒绝 xhttp（unknown transport type），mihomo 1.19.33 自检通过却真实连接失败",
+            xhttp_skipped.len()
+        ));
+    }
     if entries.is_empty() {
-        l0.push(json!({"code":"no_entries","level":"fail","message":"所选入站下没有可导出的启用客户端","fix":"检查客户端是否被停用，或重新选择"}));
+        if !xhttp_skipped.is_empty() {
+            l0.push(json!({"code":"xhttp_unsupported","level":"fail","message":"所选客户端全部是 xhttp，目标客户端均不可用，未生成订阅","fix":"改用 ws / tcp 传输，或用 xray 客户端直连"}));
+        } else {
+            l0.push(json!({"code":"no_entries","level":"fail","message":"所选入站下没有可导出的启用客户端","fix":"检查客户端是否被停用，或重新选择"}));
+        }
     }
     for (inbound, client) in &entries {
         if client.uuid.is_empty() {
@@ -130,9 +152,6 @@ pub fn render(store: &Store, sel: Selection) -> ApiResult<Rendered> {
             if inbound.reality.server_names.is_empty() {
                 l1.push(json!({"code":"reality_sni_missing","level":"fail","message":format!("入站 {} 缺少 serverNames", inbound.remark),"fix":"填写 dest / serverNames"}));
             }
-        }
-        if inbound.network == "xhttp" {
-            warnings.push(format!("{} 使用 xhttp：目标客户端支持情况未验证", inbound.remark));
         }
     }
     for (id, action) in &rules {
@@ -176,7 +195,12 @@ pub fn render(store: &Store, sel: Selection) -> ApiResult<Rendered> {
     );
 
     let l2 = run_binary_check(store, &sel.format, &render_id, ext, &content);
-    let overall = if l0.iter().any(|i| i["level"] == "fail") || l1.iter().any(|i| i["level"] == "fail") {
+    // L2 是逐请求的二进制自检：二进制缺失=UNVERIFIED（WARN），
+    // 二进制在但拒绝该配置=FAIL（与 L0/L1 一样直接判 FAIL，订阅/下载必须拒绝）。
+    let overall = if l0.iter().any(|i| i["level"] == "fail")
+        || l1.iter().any(|i| i["level"] == "fail")
+        || l2["status"] == "FAIL"
+    {
         "FAIL"
     } else if sel.format == "singbox" && !bucket_built(&sel.bucket) {
         "FAIL"

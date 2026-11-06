@@ -1504,6 +1504,63 @@ tbody tr:hover { background: var(--surface-2); }
             </div>
           </div>
         </div>
+        <div class="card" style="margin-top:14px" id="import-card">
+          <div class="card-head">
+            <div><h3>从 3x-ui 导入</h3><p>直接粘贴或上传 3x-ui 的入站 JSON：自动识别单条对象、<code>inbounds</code> 数组与整份备份；settings / streamSettings 是对象或「字符串化 JSON」都能解。数据库只读迁移保留为批量兜底。</p></div>
+            <div class="card-actions"><span class="badge ok plain">主路径 · JSON</span><span class="badge muted plain">先预览后落地</span></div>
+          </div>
+          <div class="card-body">
+            <div class="board-tabs" id="import-source-tabs" style="margin-bottom:12px">
+              <button class="active" data-import-mode="paste">粘贴 JSON</button>
+              <button data-import-mode="file">上传文件</button>
+              <button data-import-mode="db">3x-ui 数据库（兜底）</button>
+            </div>
+            <div id="import-paste-pane">
+              <div class="field">
+                <label for="import-json">入站 JSON</label>
+                <textarea class="textarea" id="import-json" rows="8" spellcheck="false" placeholder='支持：单条 inbound 对象 / {"inbounds": [...]} / 整份备份（含 xray、obj 等外层）'></textarea>
+                <div class="field-note">内容只用于本次解析，不写日志、不落临时文件；私钥/密码在预览与日志里一律打码。同一份内容重复导入不会产生重复入站。</div>
+              </div>
+            </div>
+            <div id="import-file-pane" style="display:none">
+              <div class="field">
+                <label for="import-file">选择 JSON 文件</label>
+                <input class="input" id="import-file" type="file" accept="application/json,.json">
+                <div class="field-note" id="import-file-note">文件在浏览器内读取后走同一解析接口，不经过服务器临时目录。</div>
+              </div>
+            </div>
+            <div id="import-db-pane" style="display:none">
+              <div class="field">
+                <label for="import-db">3x-ui 数据库路径（x-ui.db，只读）</label>
+                <input class="input" id="import-db" type="text" spellcheck="false" placeholder="C:\x-ui\x-ui.db 或 /etc/x-ui/x-ui.db">
+                <div class="field-note">只读复制后迁移，源库 SHA-256 前后一致；存在 -wal/-shm 时只拷贝 db+wal，不打开源库。用于一次性批量迁移。</div>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
+              <button class="btn btn-primary" id="import-preview">预览导入</button>
+              <button class="btn" id="import-apply" disabled>确认导入</button>
+              <span class="badge muted plain" id="import-status">未预览</span>
+            </div>
+            <div class="info-note" id="import-error" style="display:none;margin-top:10px">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v.1M12 11v5"></path></svg>
+              <span id="import-error-text"></span>
+            </div>
+            <div id="import-result" style="display:none;margin-top:12px">
+              <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+                <span class="badge ok plain" id="import-count-import">导入 0</span>
+                <span class="badge muted plain" id="import-count-skip">跳过 0</span>
+                <span class="badge warn plain" id="import-count-conflict">冲突 0</span>
+                <span class="badge info plain" id="import-shape">—</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>#</th><th>名称</th><th>协议 / 传输</th><th>端口</th><th>结果</th><th>原因</th></tr></thead>
+                  <tbody id="import-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
         <div class="card" style="margin-top:14px">
           <div class="card-head">
             <div><h3>入站列表</h3><p>端口仲裁以 (listen, port, L4) 为键；TCP 与 UDP 分开登记</p></div>

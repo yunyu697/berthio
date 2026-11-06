@@ -43,6 +43,22 @@
     }
   };
 
+  // 演示模式下的静态导入预览（与真实接口同一形状，不写状态）。
+  var DEMO_IMPORT_PREVIEW = {
+    source_kind: 'json',
+    schema: { shape: 'inbounds 数组', notes: ['演示数据'] },
+    source: { label: 'demo.json', bytes: 1024, sha256: 'demo' },
+    counts: { import: 2, skip: 1, conflict: 1, already_imported: 0, source_rows: 4 },
+    preview_id: 'demo-preview',
+    plan_hash: 'demo-plan-hash',
+    items: [
+      { position: 1, kind: 'import', source_id: 1, source_ref: 'demo-1', remark: '演示 · Reality', mapped: { protocol: 'vless', network: 'tcp', port: 2443, l4: 'tcp', enabled: true }, reasons: [] },
+      { position: 2, kind: 'import', source_id: 2, source_ref: 'demo-2', remark: '演示 · TLS+WS', mapped: { protocol: 'vless', network: 'ws', port: 28443, l4: 'tcp', enabled: true }, reasons: [] },
+      { position: 3, kind: 'skip', source_id: 3, source_ref: '', remark: '演示 · gRPC', mapped: { protocol: 'vless', network: 'grpc', port: 27447, l4: 'tcp', enabled: true }, reasons: ['传输方式 grpc 暂无安全映射，已跳过'] },
+      { position: 4, kind: 'conflict', source_id: 4, source_ref: '', remark: '演示 · 坏 Reality', mapped: { protocol: 'vless', network: 'tcp', port: 27443, l4: 'tcp', enabled: true }, reasons: ['realitySettings 缺少 privateKey（只有 publicKey），xray -test 会拒绝'] }
+    ]
+  };
+
   /* ---------------- 数据层：真实接口 / 静态 demo 同一形状 ---------------- */
   function demoPost(path, body) {
     if (path === '/api/inbound/inbounds') {
@@ -132,6 +148,14 @@
       var method0 = (opts && opts.method) || 'GET';
       if (method0 !== 'GET') {
         var bod = JSON.parse((opts && opts.body) || '{}');
+        if (key0 === '/api/migrate/preview') return Promise.resolve(clone(DEMO_IMPORT_PREVIEW));
+        if (key0 === '/api/migrate/apply') {
+          return Promise.resolve({
+            demo: true, imported: 0, items: clone(DEMO_IMPORT_PREVIEW.items),
+            counts: clone(DEMO_IMPORT_PREVIEW.counts),
+            message: '演示模式：不会写入真实状态'
+          });
+        }
         if (key0.indexOf('/api/rulesets/') === 0) return Promise.resolve(demoMirror(method0, key0, bod));
         return Promise.resolve(demoPost(key0, bod));
       }
@@ -249,6 +273,7 @@
     bindExportEvents();
     bindTokenActions();
     bindMirrorEvents();
+    bindImportEvents();
     if (DEMO) {
       AUTH.csrf = 'demo-csrf';
       loadAll();
@@ -377,6 +402,147 @@
         });
       });
     });
+  }
+
+  /* ---------------- 从 3x-ui 导入（JSON 主路径 / DB 兜底） ---------------- */
+  var IMPORT = { mode: 'paste', fileText: '', fileLabel: '', plan: null };
+
+  function bindImportEvents() {
+    var tabs = $$('#import-source-tabs button');
+    tabs.forEach(function (b) {
+      b.addEventListener('click', function () {
+        tabs.forEach(function (x) { x.classList.toggle('active', x === b); });
+        IMPORT.mode = b.dataset.importMode;
+        $('#import-paste-pane').style.display = IMPORT.mode === 'paste' ? '' : 'none';
+        $('#import-file-pane').style.display = IMPORT.mode === 'file' ? '' : 'none';
+        $('#import-db-pane').style.display = IMPORT.mode === 'db' ? '' : 'none';
+        resetImport();
+      });
+    });
+    $('#import-json').addEventListener('input', resetImport);
+    $('#import-file').addEventListener('change', function () {
+      var f = this.files && this.files[0];
+      IMPORT.fileText = '';
+      IMPORT.fileLabel = '';
+      resetImport();
+      if (!f) return;
+      if (f.size > 8 * 1024 * 1024) {
+        showImportError('文件超过 8 MB；请改用数据库迁移或拆分导入');
+        this.value = '';
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function () {
+        IMPORT.fileText = String(reader.result || '');
+        IMPORT.fileLabel = f.name;
+        $('#import-file-note').textContent = '已读取 ' + f.name + '（' + (f.size / 1024).toFixed(1) + ' KB）；解析后即从内存丢弃。';
+      };
+      reader.onerror = function () { showImportError('读取文件失败，请重试'); };
+      reader.readAsText(f);
+    });
+    $('#import-preview').addEventListener('click', previewImport);
+    $('#import-apply').addEventListener('click', applyImport);
+  }
+
+  function resetImport() {
+    IMPORT.plan = null;
+    $('#import-apply').disabled = true;
+    $('#import-result').style.display = 'none';
+    $('#import-error').style.display = 'none';
+    $('#import-status').textContent = '未预览';
+    $('#import-status').className = 'badge muted plain';
+  }
+
+  function showImportError(msg) {
+    IMPORT.plan = null;
+    $('#import-error-text').textContent = msg;
+    $('#import-error').style.display = '';
+    $('#import-result').style.display = 'none';
+    $('#import-apply').disabled = true;
+    $('#import-status').textContent = '解析失败';
+    $('#import-status').className = 'badge warn plain';
+  }
+
+  function importBody() {
+    if (IMPORT.mode === 'db') {
+      var p = $('#import-db').value.trim();
+      if (!p) { showImportError('请填写 x-ui.db 的完整路径'); return null; }
+      return { db_path: p, label: p.split(/[\\/]/).pop() };
+    }
+    if (IMPORT.mode === 'file') {
+      if (!IMPORT.fileText) { showImportError('请先选择 JSON 文件'); return null; }
+      return { json_text: IMPORT.fileText, label: IMPORT.fileLabel || 'upload.json' };
+    }
+    var text = $('#import-json').value.trim();
+    if (!text) { showImportError('请粘贴 3x-ui 导出的入站 JSON'); return null; }
+    return { json_text: text, label: 'pasted' };
+  }
+
+  function previewImport() {
+    var body = importBody();
+    if (!body) return;
+    $('#import-error').style.display = 'none';
+    $('#import-preview').disabled = true;
+    $('#import-status').textContent = '解析中…';
+    $('#import-status').className = 'badge info plain';
+    api('/api/migrate/preview', { method: 'POST', body: JSON.stringify(body) })
+      .then(function (r) {
+        IMPORT.plan = { body: body, preview: r };
+        renderImportPlan(r);
+        $('#import-status').textContent = '预览就绪 · ' + (r.source_kind === 'db' ? '数据库' : 'JSON') +
+          (r.counts.already_imported ? ' · 已导入 ' + r.counts.already_imported : '');
+        $('#import-status').className = 'badge ok plain';
+        $('#import-apply').disabled = !(r.counts.import > 0);
+      })
+      .catch(function (e) { showImportError(e.message); })
+      .then(function () { $('#import-preview').disabled = false; });
+  }
+
+  function renderImportPlan(r) {
+    $('#import-result').style.display = '';
+    $('#import-count-import').textContent = '导入 ' + r.counts.import;
+    $('#import-count-skip').textContent = '跳过 ' + r.counts.skip +
+      (r.counts.already_imported ? ' · 已导入 ' + r.counts.already_imported : '');
+    $('#import-count-conflict').textContent = '冲突 ' + r.counts.conflict;
+    $('#import-shape').textContent = (r.schema && r.schema.shape) || '—';
+    var rows = (r.items || []).map(function (it) {
+      var kind = it.kind === 'import' ? ['ok', '导入'] : (it.kind === 'conflict' ? ['warn', '冲突'] : ['muted', '跳过']);
+      var m = it.mapped || {};
+      return '<tr><td class="mono">' + esc(it.position || '—') + '</td>' +
+        '<td>' + esc(it.remark || ('#' + it.source_id)) + '</td>' +
+        '<td class="mono">' + esc(m.protocol || '—') + (m.network ? ' + ' + esc(m.network) : '') + '</td>' +
+        '<td class="mono">' + esc(m.port == null ? '—' : m.port + '/' + (m.l4 || 'tcp')) + '</td>' +
+        '<td><span class="badge ' + kind[0] + ' plain">' + kind[1] + '</span></td>' +
+        '<td class="mono">' + esc((it.reasons || []).join('；') || '—') + '</td></tr>';
+    }).join('');
+    $('#import-tbody').innerHTML = rows || '<tr><td colspan="6"><div class="table-note">没有可导入的条目</div></td></tr>';
+  }
+
+  function applyImport() {
+    if (!IMPORT.plan) return;
+    var p = IMPORT.plan;
+    var body = Object.assign({}, p.body, {
+      preview_id: p.preview.preview_id, plan_hash: p.preview.plan_hash, confirm: true
+    });
+    $('#import-apply').disabled = true;
+    $('#import-status').textContent = '写入中…';
+    api('/api/migrate/apply', { method: 'POST', body: JSON.stringify(body) })
+      .then(function (res) {
+        if (res.demo) {
+          toast('演示模式', res.message || '不会写入真实状态');
+        } else {
+          toast('导入完成', '新增 ' + res.imported + ' 条 · 跳过 ' + res.counts.skip + ' · 冲突 ' + res.counts.conflict);
+        }
+        IMPORT.plan = null;
+        $('#import-status').textContent = res.demo ? '演示模式（未写入）' : '已导入 ' + res.imported + ' 条';
+        $('#import-status').className = 'badge ok plain';
+        renderImportPlan(Object.assign({}, p.preview, { counts: res.counts, items: res.items || p.preview.items }));
+        if (!res.demo) loadAll();
+      })
+      .catch(function (e) {
+        if (e.code === 'plan_changed') showImportError('预览已过期（状态发生变化），请重新预览');
+        else showImportError(e.message);
+      });
   }
 
   var clientCache = {};

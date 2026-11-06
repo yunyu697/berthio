@@ -45,6 +45,9 @@ fn run_normal() {
             std::process::exit(1);
         }
     };
+    for note in store.startup_notes() {
+        eprintln!("[berthio] schema 升级：{note}");
+    }
     let (listen, warning) = store.config().effective_listen();
     if let Some(w) = warning {
         eprintln!("[berthio] 安全提示：{w}");

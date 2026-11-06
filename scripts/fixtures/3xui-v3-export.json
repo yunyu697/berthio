@@ -1,0 +1,729 @@
+{
+  "_warning": "测试夹具：含一次性生成的 REALITY 私钥，仅用于导入映射测试，不对应任何可用服务端。",
+  "success": true,
+  "msg": "",
+  "obj": [
+    {
+      "id": 1,
+      "up": 0,
+      "down": 0,
+      "total": 0,
+      "remark": "v3-东京-REALITY",
+      "subSortIndex": 1,
+      "excludeFromSub": false,
+      "enable": true,
+      "expiryTime": 0,
+      "trafficReset": "never",
+      "trafficResetDay": 1,
+      "lastTrafficResetTime": 0,
+      "clientStats": [
+        {
+          "id": 1,
+          "inboundId": 1,
+          "enable": true,
+          "email": "v3-alice@demo",
+          "uuid": "11111111-1111-4111-8111-111111111111",
+          "subId": "",
+          "up": 0,
+          "down": 0,
+          "expiryTime": 1893456000000,
+          "total": 10737418240,
+          "reset": 0,
+          "resetDay": 0,
+          "resetWeekday": 0,
+          "resetMax": 0,
+          "resetCount": 0,
+          "lastOnline": 0,
+          "lastSubFetch": 0
+        },
+        {
+          "id": 2,
+          "inboundId": 1,
+          "enable": true,
+          "email": "v3-bob@demo",
+          "uuid": "22222222-2222-4222-8222-222222222222",
+          "subId": "",
+          "up": 0,
+          "down": 0,
+          "expiryTime": 0,
+          "total": 0,
+          "reset": 0,
+          "resetDay": 0,
+          "resetWeekday": 0,
+          "resetMax": 0,
+          "resetCount": 0,
+          "lastOnline": 0,
+          "lastSubFetch": 0
+        }
+      ],
+      "listen": "0.0.0.0",
+      "port": 2443,
+      "protocol": "vless",
+      "tag": "v3-jp-reality",
+      "shareAddrStrategy": "node",
+      "shareAddr": "",
+      "disableFlow": false,
+      "originNodeGuid": "d4067a63-1914-4d5d-97a2-aa0e321b5de3",
+      "settings": {
+        "clients": [
+          {
+            "id": "11111111-1111-4111-8111-111111111111",
+            "security": "",
+            "flow": "xtls-rprx-vision",
+            "email": "v3-alice@demo",
+            "limitIp": 3,
+            "totalGB": 10737418240,
+            "expiryTime": 1893456000000,
+            "enable": true,
+            "tgId": 0,
+            "subId": "",
+            "comment": "",
+            "reset": 0,
+            "resetDay": 0,
+            "resetWeekday": 0,
+            "resetMax": 0,
+            "created_at": 1793943026000,
+            "updated_at": 1793943026000
+          },
+          {
+            "id": "22222222-2222-4222-8222-222222222222",
+            "security": "",
+            "flow": "xtls-rprx-vision",
+            "email": "v3-bob@demo",
+            "limitIp": 1,
+            "totalGB": 0,
+            "expiryTime": 0,
+            "enable": true,
+            "tgId": 0,
+            "subId": "",
+            "comment": "",
+            "reset": 0,
+            "resetDay": 0,
+            "resetWeekday": 0,
+            "resetMax": 0,
+            "created_at": 1793943026000,
+            "updated_at": 1793943026000
+          }
+        ],
+        "decryption": "none",
+        "fallbacks": []
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "www.microsoft.com:443",
+          "xver": 0,
+          "serverNames": [
+            "www.microsoft.com"
+          ],
+          "privateKey": "wCmzHKJR4pef2-B7uIv60Myqv1q-1RF74KZBwDYZaFU",
+          "settings": {
+            "publicKey": "qiOGSbhAOlBTvto_J5F05B8ELVjqqrmoq1lpyFK0gBs",
+            "fingerprint": "chrome",
+            "serverName": "",
+            "spiderX": "/"
+          },
+          "shortIds": [
+            "0123456789abcdef"
+          ],
+          "maxTimediff": 0
+        },
+        "tcpSettings": {
+          "acceptProxyProtocol": false
+        }
+      },
+      "sniffing": {}
+    },
+    {
+      "id": 2,
+      "up": 0,
+      "down": 0,
+      "total": 0,
+      "remark": "v3-新加坡-TLS-WS",
+      "subSortIndex": 1,
+      "excludeFromSub": false,
+      "enable": true,
+      "expiryTime": 0,
+      "trafficReset": "never",
+      "trafficResetDay": 1,
+      "lastTrafficResetTime": 0,
+      "clientStats": [
+        {
+          "id": 3,
+          "inboundId": 2,
+          "enable": true,
+          "email": "v3-carol@demo",
+          "uuid": "33333333-3333-4333-8333-333333333333",
+          "subId": "",
+          "up": 0,
+          "down": 0,
+          "expiryTime": 1893456000000,
+          "total": 5368709120,
+          "reset": 0,
+          "resetDay": 0,
+          "resetWeekday": 0,
+          "resetMax": 0,
+          "resetCount": 0,
+          "lastOnline": 0,
+          "lastSubFetch": 0
+        }
+      ],
+      "listen": "0.0.0.0",
+      "port": 28443,
+      "protocol": "vless",
+      "tag": "v3-sg-tls",
+      "shareAddrStrategy": "node",
+      "shareAddr": "",
+      "disableFlow": false,
+      "originNodeGuid": "d4067a63-1914-4d5d-97a2-aa0e321b5de3",
+      "settings": {
+        "clients": [
+          {
+            "id": "33333333-3333-4333-8333-333333333333",
+            "security": "",
+            "email": "v3-carol@demo",
+            "limitIp": 0,
+            "totalGB": 5368709120,
+            "expiryTime": 1893456000000,
+            "enable": true,
+            "tgId": 0,
+            "subId": "",
+            "comment": "",
+            "reset": 0,
+            "resetDay": 0,
+            "resetWeekday": 0,
+            "resetMax": 0,
+            "created_at": 1793943062000,
+            "updated_at": 1793943062000
+          }
+        ],
+        "decryption": "none",
+        "fallbacks": []
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "v3.example.com",
+          "certificates": [
+            {
+              "certificateFile": "/etc/x-ui/cert.pem",
+              "keyFile": "/etc/x-ui/key.pem"
+            }
+          ]
+        },
+        "wsSettings": {
+          "path": "/",
+          "headers": {}
+        }
+      },
+      "sniffing": {}
+    },
+    {
+      "id": 3,
+      "up": 0,
+      "down": 0,
+      "total": 0,
+      "remark": "v3-旧协议-TROJAN",
+      "subSortIndex": 1,
+      "excludeFromSub": false,
+      "enable": true,
+      "expiryTime": 0,
+      "trafficReset": "never",
+      "trafficResetDay": 1,
+      "lastTrafficResetTime": 0,
+      "clientStats": [
+        {
+          "id": 4,
+          "inboundId": 3,
+          "enable": false,
+          "email": "v3-troy@demo",
+          "uuid": "",
+          "subId": "",
+          "up": 0,
+          "down": 0,
+          "expiryTime": 0,
+          "total": 0,
+          "reset": 0,
+          "resetDay": 0,
+          "resetWeekday": 0,
+          "resetMax": 0,
+          "resetCount": 0,
+          "lastOnline": 0,
+          "lastSubFetch": 0
+        }
+      ],
+      "listen": "0.0.0.0",
+      "port": 24053,
+      "protocol": "trojan",
+      "tag": "v3-trojan",
+      "shareAddrStrategy": "node",
+      "shareAddr": "",
+      "disableFlow": false,
+      "originNodeGuid": "d4067a63-1914-4d5d-97a2-aa0e321b5de3",
+      "settings": {
+        "clients": [
+          {
+            "security": "",
+            "password": "trojan-pw",
+            "email": "v3-troy@demo",
+            "limitIp": 0,
+            "totalGB": 0,
+            "expiryTime": 0,
+            "enable": false,
+            "tgId": 0,
+            "subId": "",
+            "comment": "",
+            "reset": 0,
+            "resetDay": 0,
+            "resetWeekday": 0,
+            "resetMax": 0,
+            "created_at": 1793943062000,
+            "updated_at": 1793943062000
+          }
+        ],
+        "fallbacks": []
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "trojan.example.com",
+          "certificates": [
+            {
+              "certificateFile": "/etc/x-ui/cert.pem",
+              "keyFile": "/etc/x-ui/key.pem"
+            }
+          ]
+        }
+      },
+      "sniffing": {}
+    },
+    {
+      "id": 4,
+      "up": 0,
+      "down": 0,
+      "total": 0,
+      "remark": "v3-坏-REALITY-只认publicKey",
+      "subSortIndex": 1,
+      "excludeFromSub": false,
+      "enable": true,
+      "expiryTime": 0,
+      "trafficReset": "never",
+      "trafficResetDay": 1,
+      "lastTrafficResetTime": 0,
+      "clientStats": [
+        {
+          "id": 5,
+          "inboundId": 4,
+          "enable": true,
+          "email": "v3-dave@demo",
+          "uuid": "44444444-4444-4444-8444-444444444444",
+          "subId": "",
+          "up": 0,
+          "down": 0,
+          "expiryTime": 0,
+          "total": 0,
+          "reset": 0,
+          "resetDay": 0,
+          "resetWeekday": 0,
+          "resetMax": 0,
+          "resetCount": 0,
+          "lastOnline": 0,
+          "lastSubFetch": 0
+        }
+      ],
+      "listen": "0.0.0.0",
+      "port": 27443,
+      "protocol": "vless",
+      "tag": "v3-bad-reality",
+      "shareAddrStrategy": "node",
+      "shareAddr": "",
+      "disableFlow": false,
+      "originNodeGuid": "d4067a63-1914-4d5d-97a2-aa0e321b5de3",
+      "settings": {
+        "clients": [
+          {
+            "id": "44444444-4444-4444-8444-444444444444",
+            "security": "",
+            "email": "v3-dave@demo",
+            "limitIp": 0,
+            "totalGB": 0,
+            "expiryTime": 0,
+            "enable": true,
+            "tgId": 0,
+            "subId": "",
+            "comment": "",
+            "reset": 0,
+            "resetDay": 0,
+            "resetWeekday": 0,
+            "resetMax": 0,
+            "created_at": 1793943062000,
+            "updated_at": 1793943062000
+          }
+        ],
+        "decryption": "none",
+        "fallbacks": []
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "www.microsoft.com:443",
+          "xver": 0,
+          "serverNames": [
+            "www.microsoft.com"
+          ],
+          "privateKey": "",
+          "settings": {
+            "publicKey": "qiOGSbhAOlBTvto_J5F05B8ELVjqqrmoq1lpyFK0gBs",
+            "fingerprint": "chrome",
+            "serverName": "",
+            "spiderX": "/"
+          },
+          "shortIds": [
+            "0123456789abcdef"
+          ],
+          "maxTimediff": 0
+        },
+        "tcpSettings": {
+          "acceptProxyProtocol": false
+        }
+      },
+      "sniffing": {}
+    },
+    {
+      "id": 5,
+      "up": 0,
+      "down": 0,
+      "total": 0,
+      "remark": "v3-WS-自定义路径",
+      "subSortIndex": 1,
+      "excludeFromSub": false,
+      "enable": true,
+      "expiryTime": 0,
+      "trafficReset": "never",
+      "trafficResetDay": 1,
+      "lastTrafficResetTime": 0,
+      "clientStats": [
+        {
+          "id": 6,
+          "inboundId": 5,
+          "enable": true,
+          "email": "v3-ws-custom@demo",
+          "uuid": "33333333-3333-4333-8333-333333333333",
+          "subId": "",
+          "up": 0,
+          "down": 0,
+          "expiryTime": 0,
+          "total": 0,
+          "reset": 0,
+          "resetDay": 0,
+          "resetWeekday": 0,
+          "resetMax": 0,
+          "resetCount": 0,
+          "lastOnline": 0,
+          "lastSubFetch": 0
+        }
+      ],
+      "listen": "0.0.0.0",
+      "port": 28445,
+      "protocol": "vless",
+      "tag": "v3-ws-custom",
+      "shareAddrStrategy": "node",
+      "shareAddr": "",
+      "disableFlow": false,
+      "originNodeGuid": "d4067a63-1914-4d5d-97a2-aa0e321b5de3",
+      "settings": {
+        "clients": [
+          {
+            "id": "33333333-3333-4333-8333-333333333333",
+            "security": "",
+            "email": "v3-ws-custom@demo",
+            "limitIp": 0,
+            "totalGB": 0,
+            "expiryTime": 0,
+            "enable": true,
+            "tgId": 0,
+            "subId": "",
+            "comment": "",
+            "reset": 0,
+            "resetDay": 0,
+            "resetWeekday": 0,
+            "resetMax": 0,
+            "created_at": 1793943062000,
+            "updated_at": 1793943062000
+          }
+        ],
+        "decryption": "none",
+        "fallbacks": []
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "v3.example.com",
+          "certificates": [
+            {
+              "certificateFile": "/etc/x-ui/cert.pem",
+              "keyFile": "/etc/x-ui/key.pem"
+            }
+          ]
+        },
+        "wsSettings": {
+          "path": "/custom",
+          "headers": {}
+        }
+      },
+      "sniffing": {}
+    },
+    {
+      "id": 6,
+      "up": 0,
+      "down": 0,
+      "total": 0,
+      "remark": "v3-无客户端",
+      "subSortIndex": 1,
+      "excludeFromSub": false,
+      "enable": true,
+      "expiryTime": 0,
+      "trafficReset": "never",
+      "trafficResetDay": 1,
+      "lastTrafficResetTime": 0,
+      "clientStats": [],
+      "listen": "0.0.0.0",
+      "port": 27446,
+      "protocol": "vless",
+      "tag": "v3-no-clients",
+      "shareAddrStrategy": "node",
+      "shareAddr": "",
+      "disableFlow": false,
+      "originNodeGuid": "d4067a63-1914-4d5d-97a2-aa0e321b5de3",
+      "settings": {
+        "clients": [],
+        "decryption": "none",
+        "fallbacks": []
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "www.microsoft.com:443",
+          "xver": 0,
+          "serverNames": [
+            "www.microsoft.com"
+          ],
+          "privateKey": "wCmzHKJR4pef2-B7uIv60Myqv1q-1RF74KZBwDYZaFU",
+          "settings": {
+            "publicKey": "qiOGSbhAOlBTvto_J5F05B8ELVjqqrmoq1lpyFK0gBs",
+            "fingerprint": "chrome",
+            "serverName": "",
+            "spiderX": "/"
+          },
+          "shortIds": [
+            "0123456789abcdef"
+          ],
+          "maxTimediff": 0
+        },
+        "tcpSettings": {
+          "acceptProxyProtocol": false
+        }
+      },
+      "sniffing": {}
+    },
+    {
+      "id": 7,
+      "up": 0,
+      "down": 0,
+      "total": 0,
+      "remark": "v3-已停用-REALITY",
+      "subSortIndex": 1,
+      "excludeFromSub": false,
+      "enable": false,
+      "expiryTime": 0,
+      "trafficReset": "never",
+      "trafficResetDay": 1,
+      "lastTrafficResetTime": 0,
+      "clientStats": [
+        {
+          "id": 7,
+          "inboundId": 7,
+          "enable": true,
+          "email": "v3-paused@demo",
+          "uuid": "66666666-6666-4666-8666-666666666666",
+          "subId": "",
+          "up": 0,
+          "down": 0,
+          "expiryTime": 0,
+          "total": 0,
+          "reset": 0,
+          "resetDay": 0,
+          "resetWeekday": 0,
+          "resetMax": 0,
+          "resetCount": 0,
+          "lastOnline": 0,
+          "lastSubFetch": 0
+        }
+      ],
+      "listen": "0.0.0.0",
+      "port": 29443,
+      "protocol": "vless",
+      "tag": "v3-paused-reality",
+      "shareAddrStrategy": "node",
+      "shareAddr": "",
+      "disableFlow": false,
+      "originNodeGuid": "d4067a63-1914-4d5d-97a2-aa0e321b5de3",
+      "settings": {
+        "clients": [
+          {
+            "id": "66666666-6666-4666-8666-666666666666",
+            "security": "",
+            "email": "v3-paused@demo",
+            "limitIp": 0,
+            "totalGB": 0,
+            "expiryTime": 0,
+            "enable": true,
+            "tgId": 0,
+            "subId": "",
+            "comment": "",
+            "reset": 0,
+            "resetDay": 0,
+            "resetWeekday": 0,
+            "resetMax": 0,
+            "created_at": 1793943062000,
+            "updated_at": 1793943062000
+          }
+        ],
+        "decryption": "none",
+        "fallbacks": []
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "www.cloudflare.com:443",
+          "xver": 0,
+          "serverNames": [
+            "www.cloudflare.com"
+          ],
+          "privateKey": "wCmzHKJR4pef2-B7uIv60Myqv1q-1RF74KZBwDYZaFU",
+          "settings": {
+            "publicKey": "qiOGSbhAOlBTvto_J5F05B8ELVjqqrmoq1lpyFK0gBs",
+            "fingerprint": "chrome",
+            "serverName": "",
+            "spiderX": "/"
+          },
+          "shortIds": [
+            "0123456789abcdef"
+          ],
+          "maxTimediff": 0
+        },
+        "tcpSettings": {
+          "acceptProxyProtocol": false
+        }
+      },
+      "sniffing": {}
+    },
+    {
+      "id": 8,
+      "up": 0,
+      "down": 0,
+      "total": 0,
+      "remark": "v3-gRPC-REALITY",
+      "subSortIndex": 1,
+      "excludeFromSub": false,
+      "enable": true,
+      "expiryTime": 0,
+      "trafficReset": "never",
+      "trafficResetDay": 1,
+      "lastTrafficResetTime": 0,
+      "clientStats": [
+        {
+          "id": 8,
+          "inboundId": 8,
+          "enable": true,
+          "email": "v3-grpc@demo",
+          "uuid": "77777777-7777-4777-8777-777777777777",
+          "subId": "",
+          "up": 0,
+          "down": 0,
+          "expiryTime": 0,
+          "total": 0,
+          "reset": 0,
+          "resetDay": 0,
+          "resetWeekday": 0,
+          "resetMax": 0,
+          "resetCount": 0,
+          "lastOnline": 0,
+          "lastSubFetch": 0
+        }
+      ],
+      "listen": "0.0.0.0",
+      "port": 27447,
+      "protocol": "vless",
+      "tag": "v3-grpc",
+      "shareAddrStrategy": "node",
+      "shareAddr": "",
+      "disableFlow": false,
+      "originNodeGuid": "d4067a63-1914-4d5d-97a2-aa0e321b5de3",
+      "settings": {
+        "clients": [
+          {
+            "id": "77777777-7777-4777-8777-777777777777",
+            "security": "",
+            "email": "v3-grpc@demo",
+            "limitIp": 0,
+            "totalGB": 0,
+            "expiryTime": 0,
+            "enable": true,
+            "tgId": 0,
+            "subId": "",
+            "comment": "",
+            "reset": 0,
+            "resetDay": 0,
+            "resetWeekday": 0,
+            "resetMax": 0,
+            "created_at": 1793945229000,
+            "updated_at": 1793945229000
+          }
+        ],
+        "decryption": "none",
+        "fallbacks": []
+      },
+      "streamSettings": {
+        "network": "grpc",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "www.microsoft.com:443",
+          "xver": 0,
+          "serverNames": [
+            "www.microsoft.com"
+          ],
+          "privateKey": "wCmzHKJR4pef2-B7uIv60Myqv1q-1RF74KZBwDYZaFU",
+          "settings": {
+            "publicKey": "qiOGSbhAOlBTvto_J5F05B8ELVjqqrmoq1lpyFK0gBs",
+            "fingerprint": "chrome",
+            "serverName": "",
+            "spiderX": "/"
+          },
+          "shortIds": [
+            "0123456789abcdef"
+          ],
+          "maxTimediff": 0
+        },
+        "grpcSettings": {
+          "serviceName": "v3grpc",
+          "authority": "",
+          "multiMode": false
+        }
+      },
+      "sniffing": {}
+    }
+  ]
+}

@@ -1,12 +1,29 @@
 use crate::error::{ApiError, ApiResult};
-use crate::model::State;
+use crate::model::{State, SCHEMA_VERSION};
 use crate::util;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:18080";
+
+/// config/panel.json 的 schema 版本。
+///
+/// - v1：alpha 系列。
+/// - v2：1.0.0。监听地址/日志保留天数/可信代理做一次规范化；
+///   旧版本启动时自动迁移并留备份。
+pub const CONFIG_SCHEMA_VERSION: u32 = 2;
+
+/// 一次文件级 schema 升级的记录（启动时打印并写入审计）。
+#[derive(Debug, Clone)]
+pub struct UpgradeNote {
+    pub kind: &'static str,
+    pub from: u32,
+    pub to: u32,
+    pub backup: Option<PathBuf>,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RemoteAccess {
@@ -37,7 +54,7 @@ pub struct PanelConfig {
 }
 
 fn default_schema() -> u32 {
-    1
+    CONFIG_SCHEMA_VERSION
 }
 fn default_listen() -> String {
     DEFAULT_LISTEN.to_string()
@@ -46,7 +63,7 @@ fn default_listen() -> String {
 impl Default for PanelConfig {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: CONFIG_SCHEMA_VERSION,
             listen: DEFAULT_LISTEN.to_string(),
             panel_address: String::new(),
             log_keep_days: 14,
@@ -109,6 +126,7 @@ impl Config {
         for sub in [
             "config",
             "state",
+            "state/backups",
             "logs/audit",
             "logs/kernels",
             "state/kernels",
@@ -125,29 +143,45 @@ impl Config {
         self.home.join("config/panel.json")
     }
 
-    pub fn load_panel(&self) -> PanelConfig {
+    /// 读取 `config/panel.json`；旧 schema 会先备份再自动迁移。
+    pub fn load_panel(&self) -> ApiResult<(PanelConfig, Vec<UpgradeNote>)> {
         let path = self.panel_config_path();
-        if path.exists() {
-            if let Ok(v) = util::read_json(&path) {
-                if let Ok(mut cfg) = serde_json::from_value::<PanelConfig>(v) {
-                    if let Ok(env_listen) = std::env::var("BERTHIO_LISTEN") {
-                        cfg.listen = env_listen;
-                    }
-                    return cfg;
-                }
+        let mut notes = Vec::new();
+        let mut cfg = if path.exists() {
+            let backups = self.home.join("state/backups");
+            let (value, note) = upgrade_file(
+                &path,
+                &backups,
+                "panel",
+                CONFIG_SCHEMA_VERSION,
+                migrate_panel,
+                |v| {
+                    serde_json::from_value::<PanelConfig>(v.clone())
+                        .map(|_| ())
+                        .map_err(|e| format!("config schema 校验失败: {e}"))
+                },
+            )
+            .map_err(|e| ApiError::internal(format!("配置文件升级失败: {e}")))?;
+            if let Some(n) = note {
+                notes.push(n);
             }
-        }
-        let mut cfg = PanelConfig::default();
+            serde_json::from_value::<PanelConfig>(value)
+                .map_err(|e| ApiError::internal(format!("配置解析失败: {e}")))?
+        } else {
+            PanelConfig::default()
+        };
         if let Ok(env_listen) = std::env::var("BERTHIO_LISTEN") {
             cfg.listen = env_listen;
         }
-        let _ = util::write_atomic(
-            &path,
-            serde_json::to_string_pretty(&cfg)
-                .unwrap_or_default()
-                .as_bytes(),
-        );
-        cfg
+        if !path.exists() {
+            let _ = util::write_atomic(
+                &path,
+                serde_json::to_string_pretty(&cfg)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
+        }
+        Ok((cfg, notes))
     }
 
     pub fn save_panel(&self, cfg: &PanelConfig) -> ApiResult<()> {
@@ -161,18 +195,39 @@ pub struct Store {
     pub home: PathBuf,
     config: Mutex<PanelConfig>,
     inner: Mutex<State>,
+    notes: Vec<UpgradeNote>,
 }
 
 impl Store {
     pub fn load(cfg: &Config) -> ApiResult<Self> {
-        let panel = cfg.load_panel();
+        let (panel, mut notes) = cfg.load_panel()?;
         let path = cfg.home.join("state/state.json");
         let mut state: State = if path.exists() {
-            util::read_json(&path)
-                .and_then(|v| {
-                    serde_json::from_value::<State>(v).map_err(|e| format!("state schema 解析失败: {e}"))
-                })
-                .map_err(ApiError::internal)?
+            let backups = cfg.home.join("state/backups");
+            let (value, note) = upgrade_file(
+                &path,
+                &backups,
+                "state",
+                SCHEMA_VERSION,
+                migrate_state,
+                |v| {
+                    let s: State = serde_json::from_value(v.clone())
+                        .map_err(|e| format!("state schema 校验失败: {e}"))?;
+                    if s.schema_version != SCHEMA_VERSION {
+                        return Err(format!(
+                            "state schema 迁移后版本仍为 v{}（期望 v{SCHEMA_VERSION}）",
+                            s.schema_version
+                        ));
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| ApiError::internal(format!("状态升级失败: {e}")))?;
+            if let Some(n) = note {
+                notes.push(n);
+            }
+            serde_json::from_value::<State>(value)
+                .map_err(|e| ApiError::internal(format!("state schema 解析失败: {e}")))?
         } else {
             State::default()
         };
@@ -186,9 +241,41 @@ impl Store {
             home: cfg.home.clone(),
             config: Mutex::new(panel),
             inner: Mutex::new(state),
+            notes,
         };
+        for note in &store.notes {
+            store.audit(
+                "schema.upgrade",
+                "system",
+                json!({
+                    "file": note.kind,
+                    "from": note.from,
+                    "to": note.to,
+                    "backup": note.backup.as_ref().map(|p| p.display().to_string()),
+                }),
+            );
+        }
         store.persist(&store.inner.lock().unwrap())?;
         Ok(store)
+    }
+
+    /// 启动时发生的 schema 升级（供 main 打印，不含敏感数据）。
+    pub fn startup_notes(&self) -> Vec<String> {
+        self.notes
+            .iter()
+            .map(|n| {
+                format!(
+                    "{} schema v{} → v{} 已自动迁移，备份：{}",
+                    n.kind,
+                    n.from,
+                    n.to,
+                    n.backup
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "（无）".to_string())
+                )
+            })
+            .collect()
     }
 
     pub fn config(&self) -> PanelConfig {
@@ -248,10 +335,153 @@ impl Store {
     }
 }
 
+fn schema_of(v: &Value) -> u32 {
+    v.get("schema_version")
+        .and_then(|x| x.as_u64())
+        .map(|x| x.min(u32::MAX as u64) as u32)
+        .unwrap_or(1)
+}
+
+fn backup_stamp() -> String {
+    util::now_iso()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect()
+}
+
+/// 读取 JSON 文件并按需升级：
+/// 1. 版本高于本程序 → 拒绝（避免降级覆盖）；
+/// 2. 版本更低 → 先备份原始字节，再迁移、校验、原子写回、回读校验；
+/// 3. 任一步失败 → 原文件保持（或从备份回滚），返回错误。
+fn upgrade_file(
+    path: &Path,
+    backup_dir: &Path,
+    kind: &'static str,
+    current: u32,
+    migrate: impl Fn(&mut Value, u32),
+    validate: impl Fn(&Value) -> Result<(), String>,
+) -> Result<(Value, Option<UpgradeNote>), String> {
+    let raw = fs::read_to_string(path).map_err(|e| format!("读取 {} 失败: {}", path.display(), e))?;
+    let mut value: Value =
+        serde_json::from_str(&raw).map_err(|e| format!("解析 {} 失败: {e}", path.display()))?;
+    let from = schema_of(&value);
+    if from > current {
+        return Err(format!(
+            "{} 的 schema_version=v{from} 高于本程序支持的 v{current}；拒绝启动以免降级覆盖数据。请升级程序，或用 state/backups 下的备份恢复",
+            path.display()
+        ));
+    }
+    if from == current {
+        return Ok((value, None));
+    }
+    fs::create_dir_all(backup_dir)
+        .map_err(|e| format!("创建备份目录 {} 失败: {e}", backup_dir.display()))?;
+    let backup = backup_dir.join(format!("{kind}.v{from}.{}.json", backup_stamp()));
+    util::write_atomic(&backup, raw.as_bytes())
+        .map_err(|e| format!("写入升级备份 {} 失败: {e}", backup.display()))?;
+    migrate(&mut value, from);
+    value["schema_version"] = json!(current);
+    validate(&value)?;
+    let body = serde_json::to_string_pretty(&value).map_err(|e| format!("序列化失败: {e}"))?;
+    util::write_atomic(path, body.as_bytes())
+        .map_err(|e| format!("写回 {} 失败: {e}", path.display()))?;
+    let readback = fs::read_to_string(path)
+        .map_err(|e| format!("回读 {} 失败: {e}", path.display()))
+        .and_then(|s| serde_json::from_str::<Value>(&s).map_err(|e| e.to_string()))
+        .and_then(|v| validate(&v));
+    if let Err(e) = readback {
+        let rollback = fs::read_to_string(&backup)
+            .map_err(|e| e.to_string())
+            .and_then(|s| util::write_atomic(path, s.as_bytes()));
+        return Err(match rollback {
+            Ok(()) => format!(
+                "迁移写回校验失败：{e}；已回滚到 {}",
+                backup.display()
+            ),
+            Err(re) => format!("迁移写回校验失败：{e}；回滚也失败：{re}"),
+        });
+    }
+    Ok((
+        value,
+        Some(UpgradeNote {
+            kind,
+            from,
+            to: current,
+            backup: Some(backup),
+        }),
+    ))
+}
+
+/// panel.json v1 → v2：监听地址/日志保留天数/可信代理规范化。
+fn migrate_panel(v: &mut Value, from: u32) {
+    if from < 2 {
+        if let Some(listen) = v.get("listen").and_then(|x| x.as_str()) {
+            if !listen.contains(':') {
+                v["listen"] = json!(DEFAULT_LISTEN);
+            }
+        }
+        let keep = v.get("log_keep_days").and_then(|x| x.as_u64()).unwrap_or(0);
+        if keep == 0 || keep > 3650 {
+            v["log_keep_days"] = json!(14);
+        }
+        if let Some(proxies) = v
+            .get_mut("remote_access")
+            .and_then(|x| x.get_mut("trusted_proxies"))
+            .and_then(|x| x.as_array_mut())
+        {
+            let cleaned: Vec<Value> = proxies
+                .iter()
+                .filter_map(|p| p.as_str())
+                .map(|p| p.trim())
+                .filter(|p| !p.is_empty())
+                .map(|p| json!(p))
+                .collect();
+            *proxies = cleaned;
+        }
+    }
+}
+
+/// state.json v1 → v2：token target 归一化、入站 source 补齐。
+fn migrate_state(v: &mut Value, from: u32) {
+    if from < 2 {
+        if let Some(tokens) = v.get_mut("tokens").and_then(|t| t.as_array_mut()) {
+            for t in tokens.iter_mut() {
+                let cur = t
+                    .get("target")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                let canon = match cur.as_str() {
+                    "" | "clash" | "clash-verge" | "clash.meta" | "mihomo" | "verge" | "stash" => {
+                        "mihomo"
+                    }
+                    "singbox" | "sing-box" => "sing-box",
+                    other => other,
+                };
+                t["target"] = json!(canon);
+            }
+        }
+        if let Some(inbounds) = v.get_mut("inbounds").and_then(|i| i.as_array_mut()) {
+            for i in inbounds.iter_mut() {
+                let source = i
+                    .get("source")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if source.is_empty() {
+                    i["source"] = json!("manual");
+                }
+            }
+        }
+    }
+}
+
 pub fn init_home(home: &Path) {
     for sub in [
         "config",
         "state",
+        "state/backups",
         "logs/audit",
         "configs/generated",
         "data/rulesets",

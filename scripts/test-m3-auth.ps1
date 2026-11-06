@@ -56,7 +56,7 @@ function Start-Panel {
   $env:BERTHIO_LOGIN_MAX_FAILS = "3"
   $env:BERTHIO_LOGIN_LOCK_SECS = "3"
   $env:BERTHIO_TRUST_PROXY = ""
-  $sp = Start-Process -FilePath $Exe -PassThru `
+  $sp = Start-Process -FilePath $Exe -PassThru -NoNewWindow `
     -RedirectStandardOutput (Join-Path $bh "panel.out.log") `
     -RedirectStandardError (Join-Path $bh "panel.err.log")
   $script:panel = $sp

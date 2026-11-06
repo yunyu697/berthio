@@ -58,7 +58,7 @@ function Start-Panel {
   $env:BERTHIO_LISTEN = "127.0.0.1:$Port"
   $env:BERTHIO_KERNEL_DIR = $KernelDir
   $env:BERTHIO_KERNEL_LOG_MAX = "1048576"
-  $sp = Start-Process -FilePath $Exe -PassThru `
+  $sp = Start-Process -FilePath $Exe -PassThru -NoNewWindow `
     -RedirectStandardOutput (Join-Path $bh "panel.out.log") `
     -RedirectStandardError (Join-Path $bh "panel.err.log")
   $script:panel = $sp

@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// state.json 的 schema 版本。
+///
+/// - v1：alpha 系列（M2–M4）的落盘格式。
+/// - v2：1.0.0。新增 `inbounds[].source_ref`；订阅 token 的 `target` 归一化；
+///   入站 `source` 缺失时补齐为 `manual`。旧版本启动时自动迁移并留备份。
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PanelState {

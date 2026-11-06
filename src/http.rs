@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const MAX_BODY: usize = 2 * 1024 * 1024;
+const MAX_BODY: usize = 8 * 1024 * 1024;
 const SESSION_COOKIE: &str = "berthio_session";
 const REMOTE_CONFIRM_PHRASE: &str = "ENABLE-REMOTE";
 
@@ -932,7 +932,7 @@ fn export_file(req: &Request, store: &Store) -> ApiResult<Response> {
     if payload["validation"]["overall"] == "FAIL" {
         return Err(ApiError::new(422, "export_blocked", "校验 FAIL，拒绝导出").with_field(
             "validation",
-            "先修正 L0/L1 中的失败项",
+            "先修正 L0/L1/L2 中的失败项",
         ));
     }
     let content = payload["content"].as_str().unwrap_or("").to_string();
@@ -948,10 +948,48 @@ fn export_file(req: &Request, store: &Store) -> ApiResult<Response> {
     ))
 }
 
+fn migrate_json_text(body: &serde_json::Value) -> String {
+    if let Some(s) = body.get("json_text").and_then(|v| v.as_str()) {
+        if !s.trim().is_empty() {
+            return s.to_string();
+        }
+    }
+    if let Some(s) = body.get("payload").and_then(|v| v.as_str()) {
+        if !s.trim().is_empty() {
+            return s.to_string();
+        }
+    }
+    match body.get("json") {
+        Some(serde_json::Value::String(s)) if !s.trim().is_empty() => s.clone(),
+        Some(v) if !v.is_null() => v.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn migrate_label(body: &serde_json::Value) -> String {
+    let raw = body
+        .get("label")
+        .or_else(|| body.get("file_name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let clean: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(80)
+        .collect();
+    if clean.trim().is_empty() {
+        "pasted".to_string()
+    } else {
+        clean.trim().to_string()
+    }
+}
+
 fn migrate_preview(req: &Request, store: &Store) -> ApiResult<Response> {
     let body = body_json(req)?;
     let db_path = body.get("db_path").and_then(|v| v.as_str()).unwrap_or("");
-    let out = crate::migrate::preview(store, db_path)?;
+    let json_text = migrate_json_text(&body);
+    let label = migrate_label(&body);
+    let out = crate::migrate::preview(store, db_path, &json_text, &label)?;
     Ok(Response::json(200, &out))
 }
 
@@ -960,6 +998,8 @@ fn migrate_apply(req: &Request, store: &Store) -> ApiResult<Response> {
     let out = crate::migrate::apply(
         store,
         body.get("db_path").and_then(|v| v.as_str()).unwrap_or(""),
+        &migrate_json_text(&body),
+        &migrate_label(&body),
         body.get("preview_id").and_then(|v| v.as_str()).unwrap_or(""),
         body.get("plan_hash").and_then(|v| v.as_str()).unwrap_or(""),
         body.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -1191,15 +1231,27 @@ fn subscription(req: &Request, token: &str, store: &Store) -> ApiResult<Response
                     .iter()
                     .find(|l| l.get("status").and_then(|s| s.as_str()) == Some("FAIL"))
             })
-            .and_then(|l| l.get("items").and_then(|v| v.as_array()))
-            .and_then(|items| {
-                items
-                    .iter()
-                    .find(|i| i.get("level").and_then(|s| s.as_str()) == Some("fail"))
+            .map(|layer| {
+                let item_msg = layer
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .and_then(|items| {
+                        items
+                            .iter()
+                            .find(|i| i.get("level").and_then(|s| s.as_str()) == Some("fail"))
+                    })
+                    .and_then(|i| i.get("message").and_then(|s| s.as_str()))
+                    .map(|s| s.to_string());
+                item_msg
+                    .or_else(|| {
+                        layer
+                            .get("output")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.trim().to_string())
+                    })
+                    .unwrap_or_default()
             })
-            .and_then(|i| i.get("message").and_then(|s| s.as_str()))
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or_default();
         store.audit(
             "sub.blocked",
             "subscription",
@@ -1208,7 +1260,7 @@ fn subscription(req: &Request, token: &str, store: &Store) -> ApiResult<Response
         let mut err = ApiError::new(
             422,
             "subscription_blocked",
-            "订阅输出未通过 L0/L1 校验，拒绝下发；修复后重试",
+            "订阅输出未通过 L0/L1/L2 校验，拒绝下发；修复后重试",
         )
         .with_field("render_id", render_id.as_str())
         .with_field("validation", overall.as_str());

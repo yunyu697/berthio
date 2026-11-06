@@ -1,6 +1,6 @@
 [package]
 name = "berthio"
-version = "1.0.0-alpha4"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Berthio 服务端入站代理面板（控制面）"
