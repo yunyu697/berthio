@@ -524,3 +524,207 @@ pub fn create_client(
         "enabled": client.enabled
     }))
 }
+
+#[derive(Debug, Default, Deserialize)]
+pub struct UpdateInboundReq {
+    #[serde(default)]
+    pub remark: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub listen: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+/// 修改入站：只允许改可安全变更的元数据（备注 / 端口 / 监听地址 / 启用状态），
+/// 协议、安全层、密钥、客户端一律不动，避免把一个入站改到与已导出配置不一致。
+pub fn update_inbound(
+    store: &Store,
+    id: &str,
+    req: UpdateInboundReq,
+    actor: &str,
+    ip: &str,
+) -> ApiResult<serde_json::Value> {
+    let mut changes = serde_json::Map::new();
+    let out = store.update(|state| {
+        let idx = state
+            .inbounds
+            .iter()
+            .position(|i| i.id == id)
+            .ok_or_else(|| ApiError::not_found(format!("入站 {id} 不存在")))?;
+        let mut next = state.inbounds[idx].clone();
+        if let Some(remark) = req.remark.as_ref() {
+            let remark = remark.trim();
+            if remark.is_empty() {
+                return Err(ApiError::bad_request("名称不能为空").with_field("remark", "填一个名称"));
+            }
+            if remark.chars().count() > 64 {
+                return Err(ApiError::bad_request("名称超过 64 字符").with_field("remark", "缩短名称"));
+            }
+            if state
+                .inbounds
+                .iter()
+                .enumerate()
+                .any(|(j, i)| j != idx && i.remark == remark)
+            {
+                return Err(ApiError::conflict("同名入站已存在").with_field("remark", "请换一个名称"));
+            }
+            if next.remark != remark {
+                changes.insert(
+                    "remark".into(),
+                    serde_json::json!({"from": next.remark.clone(), "to": remark}),
+                );
+                next.remark = remark.to_string();
+            }
+        }
+        if let Some(port) = req.port {
+            if port == 0 {
+                return Err(ApiError::bad_request("端口必须在 1..65535").with_field("port", "换一个端口"));
+            }
+            if port != next.port {
+                if state
+                    .inbounds
+                    .iter()
+                    .enumerate()
+                    .any(|(j, i)| j != idx && i.listen == next.listen && i.port == port && i.l4 == next.l4)
+                {
+                    return Err(ApiError::conflict(format!("端口冲突：{port}/{} 已被其他入站占用", next.l4))
+                        .with_field("port", "换端口 / 改监听地址"));
+                }
+                if !port_free(port) {
+                    return Err(ApiError::conflict(format!("端口 {port}/tcp 在本机 127.0.0.1 已被占用"))
+                        .with_field("port", "换端口 / 停用占用方"));
+                }
+                changes.insert("port".into(), serde_json::json!({"from": next.port, "to": port}));
+                next.port = port;
+            }
+        }
+        if let Some(listen) = req.listen.as_ref() {
+            let listen = listen.trim();
+            let listen = if listen.is_empty() {
+                "0.0.0.0".to_string()
+            } else {
+                listen.to_string()
+            };
+            if listen != next.listen {
+                if state.inbounds.iter().enumerate().any(|(j, i)| {
+                    j != idx && i.listen == listen && i.port == next.port && i.l4 == next.l4
+                }) {
+                    return Err(ApiError::conflict(format!(
+                        "监听地址冲突：{listen}:{}/{} 已被其他入站占用",
+                        next.port, next.l4
+                    ))
+                    .with_field("listen", "换监听地址"));
+                }
+                changes.insert(
+                    "listen".into(),
+                    serde_json::json!({"from": next.listen.clone(), "to": listen}),
+                );
+                next.listen = listen;
+            }
+        }
+        if let Some(enabled) = req.enabled {
+            if enabled != next.enabled {
+                changes.insert(
+                    "enabled".into(),
+                    serde_json::json!({"from": next.enabled, "to": enabled}),
+                );
+                next.enabled = enabled;
+            }
+        }
+        if changes.is_empty() {
+            return Err(ApiError::bad_request("没有需要修改的字段"));
+        }
+        next.updated_at = util::now_iso();
+        let summary = next.redacted();
+        state.inbounds[idx] = next;
+        Ok(summary)
+    });
+    match out {
+        Ok(item) => {
+            let mut detail = serde_json::json!({"inbound_id": id, "changes": changes});
+            detail["tag"] = item["tag"].clone();
+            detail["protocol"] = item["protocol"].clone();
+            store.audit_op("inbound.updated", actor, ip, id, "ok", detail);
+            Ok(serde_json::json!({"updated": true, "item": item, "changes": changes}))
+        }
+        Err(e) => {
+            store.audit_op(
+                "inbound.updated",
+                actor,
+                ip,
+                id,
+                "denied",
+                serde_json::json!({"code": e.code, "message": e.message, "changes": changes}),
+            );
+            Err(e)
+        }
+    }
+}
+
+/// 删除入站：只删状态里的一条记录并原子重写 `state/state.json`，
+/// **不删除任何文件**，因此不存在能作用到数据目录之外的路径。
+/// 二次确认：必须带上 `confirm=<入站 id>`。
+pub fn delete_inbound(
+    store: &Store,
+    id: &str,
+    confirm: &str,
+    actor: &str,
+    ip: &str,
+) -> ApiResult<serde_json::Value> {
+    if confirm != id {
+        store.audit_op(
+            "inbound.deleted",
+            actor,
+            ip,
+            id,
+            "denied",
+            serde_json::json!({"reason": "confirm_mismatch"}),
+        );
+        return Err(ApiError::bad_request("删除入站需要二次确认：confirm 必须等于入站 id")
+            .with_field("confirm", "界面会带上该参数"));
+    }
+    let removed = store.update(|state| {
+        let idx = state
+            .inbounds
+            .iter()
+            .position(|i| i.id == id)
+            .ok_or_else(|| ApiError::not_found(format!("入站 {id} 不存在")))?;
+        Ok(state.inbounds.remove(idx))
+    });
+    match removed {
+        Ok(inb) => {
+            let summary = serde_json::json!({
+                "inbound_id": inb.id,
+                "tag": inb.tag,
+                "remark": inb.remark,
+                "protocol": inb.protocol,
+                "network": inb.network,
+                "security": inb.security,
+                "listen": inb.listen,
+                "port": inb.port,
+                "l4": inb.l4,
+                "server_kernel": inb.server_kernel,
+                "client_count": inb.clients.len(),
+                "source": inb.source,
+                "source_ref": inb.source_ref,
+                "created_at": inb.created_at,
+                "files_deleted": 0,
+            });
+            store.audit_op("inbound.deleted", actor, ip, id, "ok", summary.clone());
+            Ok(serde_json::json!({"deleted": true, "id": id, "summary": summary}))
+        }
+        Err(e) => {
+            store.audit_op(
+                "inbound.deleted",
+                actor,
+                ip,
+                id,
+                "denied",
+                serde_json::json!({"code": e.code, "message": e.message}),
+            );
+            Err(e)
+        }
+    }
+}

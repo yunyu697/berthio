@@ -666,6 +666,22 @@ fn route(
         ("GET", "/api/audit") => Ok(Response::json(200, &audit_payload(store, req))),
         ("GET", "/api/audit.csv") => audit_csv(store, req),
         ("GET", p) if p.starts_with("/sub/") => subscription(req, &p[5..], store),
+        ("PATCH", p) if p.starts_with("/api/inbound/inbounds/") => {
+            let id = &p["/api/inbound/inbounds/".len()..];
+            if id.contains('/') {
+                Err(ApiError::not_found(format!("未知入站接口 {p}")))
+            } else {
+                update_inbound(req, store, id, &actor, &net.client_ip)
+            }
+        }
+        ("DELETE", p) if p.starts_with("/api/inbound/inbounds/") => {
+            let id = &p["/api/inbound/inbounds/".len()..];
+            if id.contains('/') {
+                Err(ApiError::not_found(format!("未知入站接口 {p}")))
+            } else {
+                delete_inbound(req, store, id, &actor, &net.client_ip)
+            }
+        }
         ("GET", p) if p.starts_with("/api/inbound/inbounds/") => {
             let rest = &p["/api/inbound/inbounds/".len()..];
             if let Some(id) = rest.strip_suffix("/clients") {
@@ -1316,6 +1332,20 @@ fn client_list(store: &Store, id: &str) -> serde_json::Value {
         }),
         None => json!({"inbound_id": id, "items": []}),
     }
+}
+
+fn update_inbound(req: &Request, store: &Store, id: &str, actor: &str, ip: &str) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let payload: wizard::UpdateInboundReq = serde_json::from_value(body)
+        .map_err(|e| ApiError::bad_request(format!("字段解析失败: {e}")))?;
+    let out = wizard::update_inbound(store, id, payload, actor, ip)?;
+    Ok(Response::json(200, &out))
+}
+
+fn delete_inbound(req: &Request, store: &Store, id: &str, actor: &str, ip: &str) -> ApiResult<Response> {
+    let confirm = req.query.get("confirm").map(|s| s.as_str()).unwrap_or("");
+    let out = wizard::delete_inbound(store, id, confirm, actor, ip)?;
+    Ok(Response::json(200, &out))
 }
 
 fn create_inbound(req: &Request, store: &Store, actor: &str, ip: &str) -> ApiResult<Response> {

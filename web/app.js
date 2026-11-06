@@ -412,7 +412,10 @@
           '<td><span class="badge ' + (i.server_kernel === 'xray' ? 'info' : 'accent') + ' plain">' + esc(i.server_kernel) + '</span></td>' +
           '<td>' + esc(i.clients) + '</td><td class="mono">' + fmtBytes(i.today_bytes) + '</td>' +
           '<td>' + stateBadge + '</td>' +
-          '<td style="text-align:right"><button class="btn btn-sm js-row-export" data-inbound="' + esc(i.id) + '">导出</button></td></tr>';
+          '<td style="text-align:right;white-space:nowrap">' +
+          '<button class="btn btn-sm js-row-edit" data-inbound="' + esc(i.id) + '">编辑</button>' +
+          '<button class="btn btn-sm js-row-export" data-inbound="' + esc(i.id) + '">导出</button>' +
+          '<button class="btn btn-sm js-row-del" data-inbound="' + esc(i.id) + '">删除</button></td></tr>';
       }).join('');
     }
     $('#inbound-count-badge').textContent = UI.inbounds.length + ' 个入站';
@@ -430,6 +433,70 @@
           showPage('export');
         });
       });
+    });
+    $$('.js-row-edit', tbody).forEach(function (b) {
+      b.addEventListener('click', function () { openInboundEdit(b.dataset.inbound); });
+    });
+    $$('.js-row-del', tbody).forEach(function (b) {
+      b.addEventListener('click', function () { deleteInboundRow(b.dataset.inbound); });
+    });
+  }
+
+  /* ---------------- 入站编辑 / 删除 ---------------- */
+  function openModal(title, sub, bodyHtml, confirmText, onConfirm) {
+    var m = $('#modal');
+    if (!m) return;
+    $('#modal-title').textContent = title;
+    $('#modal-sub').textContent = sub || '';
+    $('#modal-body').innerHTML = bodyHtml || '';
+    $('#modal-confirm').textContent = confirmText || '确认';
+    m.classList.add('show');
+    var close = function () { m.classList.remove('show'); };
+    $('#modal-cancel').onclick = close;
+    $('#modal-confirm').onclick = function () { close(); onConfirm(); };
+    m.onclick = function (e) { if (e.target === m) close(); };
+  }
+
+  function openInboundEdit(id) {
+    var inbound = UI.inbounds.filter(function (i) { return i.id === id; })[0];
+    if (!inbound) return;
+    if (DEMO) { toast('演示模式只读'); return; }
+    var html = '<div class="form-grid">' +
+      '<div class="field"><label>名称</label><input class="input" id="e-remark" maxlength="64" value="' + esc(inbound.remark) + '"></div>' +
+      '<div class="field"><label>监听地址</label><input class="input mono" id="e-listen" value="' + esc(inbound.listen || '0.0.0.0') + '"></div>' +
+      '<div class="field"><label>端口</label><input class="input mono" id="e-port" type="number" min="1" max="65535" value="' + esc(inbound.port) + '"></div>' +
+      '<div class="field"><label>启用</label><select class="input" id="e-enabled"><option value="1"' + (inbound.enabled ? ' selected' : '') + '>启用</option><option value="0"' + (inbound.enabled ? '' : ' selected') + '>停用</option></select></div>' +
+      '</div><div class="info-note" style="margin-top:12px">协议、安全层、客户端不在此修改。<br>保存会写入审计日志 <span class="mono">inbound.updated</span>（含改动前后值）。</div>';
+    openModal('修改入站', inbound.tag + ' · ' + inbound.id, html, '保存修改', function () {
+      var patch = {};
+      var remark = $('#e-remark').value.trim();
+      var listen = $('#e-listen').value.trim();
+      var port = parseInt($('#e-port').value, 10);
+      var enabled = $('#e-enabled').value === '1';
+      if (remark !== inbound.remark) patch.remark = remark;
+      if (listen !== (inbound.listen || '0.0.0.0')) patch.listen = listen;
+      if (port !== inbound.port) patch.port = port;
+      if (enabled !== !!inbound.enabled) patch.enabled = enabled;
+      if (!Object.keys(patch).length) { toast('没有改动'); return; }
+      api('/api/inbound/inbounds/' + encodeURIComponent(id), { method: 'PATCH', body: JSON.stringify(patch) })
+        .then(function () { toast('入站已修改', id); loadAll(); })
+        .catch(function (err) { toast('修改失败', err.message); });
+    });
+  }
+
+  function deleteInboundRow(id) {
+    var inbound = UI.inbounds.filter(function (i) { return i.id === id; })[0];
+    if (!inbound) return;
+    if (DEMO) { toast('演示模式不执行删除'); return; }
+    var body = '<div class="info-note">将删除入站 <b>' + esc(inbound.remark) + '</b>（端口 ' +
+      esc(inbound.port) + '/' + esc(inbound.l4) + '，' + esc(inbound.clients) + ' 个客户端）。<br>' +
+      '只删除状态记录并重写 <span class="mono">state.json</span>，<b>不删除任何文件</b>，不会作用到数据目录之外。<br>' +
+      '操作会写入审计日志 <span class="mono">inbound.deleted</span>（含被删入站的标识与参数摘要）。</div>';
+    openModal('删除入站？', '此操作不可撤销', body, '确认删除', function () {
+      api('/api/inbound/inbounds/' + encodeURIComponent(id) + '?confirm=' + encodeURIComponent(id),
+        { method: 'DELETE', body: '{}' })
+        .then(function () { toast('入站已删除', id); loadAll(); })
+        .catch(function (err) { toast('删除失败', err.message); });
     });
   }
 
