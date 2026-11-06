@@ -41,7 +41,8 @@ expect_reject() {
   fi
 }
 
-check() { bash "$SCRIPT" --version-file "$TMP/Cargo.toml" "$@"; }
+# 清掉 CI 环境里的 GITHUB_REF_NAME，否则脚本会自动拿发布 tag 来比对，污染反例测试
+check() { GITHUB_REF_NAME= bash "$SCRIPT" --version-file "$TMP/Cargo.toml" "$@"; }
 
 make_toml "1.0.0"
 expect_ok "正式版 1.0.0" check
