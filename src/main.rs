@@ -4,6 +4,7 @@ mod error;
 mod export;
 mod http;
 mod kernels;
+mod migrate;
 mod model;
 mod rulesets;
 mod sources;

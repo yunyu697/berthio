@@ -494,8 +494,10 @@ fn route(req: &Request, store: &Store, auth: &Auth, sup: &Supervisor, demo: bool
         ("GET", "/api/export/preview") => export_preview(req, store),
         ("GET", "/api/export/file") => export_file(req, store),
         ("POST", "/api/export/tokens") => create_token(req, store),
+        ("POST", "/api/migrate/preview") => migrate_preview(req, store),
+        ("POST", "/api/migrate/apply") => migrate_apply(req, store),
         ("GET", "/api/logs") => Ok(Response::json(200, &logs_payload(store))),
-        ("GET", p) if p.starts_with("/sub/") => subscription(&req.query, &p[5..], store),
+        ("GET", p) if p.starts_with("/sub/") => subscription(req, &p[5..], store),
         ("GET", p) if p.starts_with("/api/inbound/inbounds/") => {
             let rest = &p["/api/inbound/inbounds/".len()..];
             if let Some(id) = rest.strip_suffix("/clients") {
@@ -511,6 +513,10 @@ fn route(req: &Request, store: &Store, auth: &Auth, sup: &Supervisor, demo: bool
         ("POST", p) if p.starts_with("/api/export/tokens/") && p.ends_with("/revoke") => {
             let id = &p["/api/export/tokens/".len()..p.len() - "/revoke".len()];
             revoke_token(store, id)
+        }
+        ("POST", p) if p.starts_with("/api/export/tokens/") && p.ends_with("/rotate") => {
+            let id = &p["/api/export/tokens/".len()..p.len() - "/rotate".len()];
+            rotate_token(store, id)
         }
         _ => Err(ApiError::not_found(format!("{} {}", req.method, req.path))),
     };
@@ -942,13 +948,56 @@ fn export_file(req: &Request, store: &Store) -> ApiResult<Response> {
     ))
 }
 
+fn migrate_preview(req: &Request, store: &Store) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let db_path = body.get("db_path").and_then(|v| v.as_str()).unwrap_or("");
+    let out = crate::migrate::preview(store, db_path)?;
+    Ok(Response::json(200, &out))
+}
+
+fn migrate_apply(req: &Request, store: &Store) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let out = crate::migrate::apply(
+        store,
+        body.get("db_path").and_then(|v| v.as_str()).unwrap_or(""),
+        body.get("preview_id").and_then(|v| v.as_str()).unwrap_or(""),
+        body.get("plan_hash").and_then(|v| v.as_str()).unwrap_or(""),
+        body.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false),
+    )?;
+    Ok(Response::json(200, &out))
+}
+
+/// 订阅目标归一化：只接受两种真实导出格式，`clash` 作为 mihomo 的兼容别名。
+fn normalize_target(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "mihomo" | "clash" | "clash-verge" | "clash.meta" | "verge" | "stash" => Some("mihomo"),
+        "sing-box" | "singbox" | "sb" | "sfa" | "sfi" | "sft" => Some("sing-box"),
+        _ => None,
+    }
+}
+
+fn target_from_ua(ua: &str) -> Option<&'static str> {
+    let ua = ua.to_ascii_lowercase();
+    if ua.contains("sing-box") || ua.contains("singbox") || ua.contains("sfa/") || ua.contains("sfi/") {
+        return Some("sing-box");
+    }
+    if ua.contains("mihomo") || ua.contains("clash") || ua.contains("stash") || ua.contains("verge") {
+        return Some("mihomo");
+    }
+    None
+}
+
 fn create_token(req: &Request, store: &Store) -> ApiResult<Response> {
     let body = body_json(req)?;
     let client_id = body.get("client_id").and_then(|v| v.as_str()).unwrap_or("");
-    let target = body
+    let target_raw = body
         .get("target")
         .and_then(|v| v.as_str())
-        .unwrap_or("clash");
+        .unwrap_or("mihomo");
+    let target = normalize_target(target_raw).ok_or_else(|| {
+        ApiError::bad_request("target 只支持 mihomo / sing-box（clash 作为 mihomo 别名）")
+            .with_field("target", "mihomo | sing-box")
+    })?;
     if client_id.is_empty() {
         return Err(ApiError::bad_request("缺少 client_id").with_field("client_id", "从节点列表选择"));
     }
@@ -1012,28 +1061,109 @@ fn revoke_token(store: &Store, id: &str) -> ApiResult<Response> {
     Ok(Response::json(200, &json!({"ok":true,"id":id})))
 }
 
-fn subscription(query: &HashMap<String, String>, token: &str, store: &Store) -> ApiResult<Response> {
+fn rotate_token(store: &Store, id: &str) -> ApiResult<Response> {
+    let mut new_token = String::new();
+    store.update(|st| {
+        let t = st
+            .tokens
+            .iter_mut()
+            .find(|t| t.id == id)
+            .ok_or_else(|| ApiError::not_found("token 不存在"))?;
+        if t.revoked_at.is_some() {
+            return Err(ApiError::conflict(
+                "已吊销的令牌不能轮换；请为该客户端新建 token（吊销是终态）",
+            ));
+        }
+        new_token = format!("bto_{}", util::random_hex(24));
+        t.token_hash = util::sha256_hex(new_token.as_bytes());
+        t.last_access = None;
+        Ok(())
+    })?;
+    store.audit(
+        "export.token.rotated",
+        "local-admin",
+        json!({"token_id": id, "note": "旧 token 立即失效"}),
+    );
+    Ok(Response::json(
+        200,
+        &json!({
+            "ok": true,
+            "id": id,
+            "token": new_token,
+            "note": "旧 token 已立即失效；服务端只存新 token 的 SHA-256，明文仅本次返回",
+        }),
+    ))
+}
+
+fn subscription(req: &Request, token: &str, store: &Store) -> ApiResult<Response> {
+    if token.trim().is_empty() {
+        return Err(ApiError::new(
+            401,
+            "subscription_unauthorized",
+            "缺少订阅令牌；/sub 链接里的 token 等同于读取该客户端配置的凭据",
+        ));
+    }
     let hash = util::sha256_hex(token.as_bytes());
     let state = store.snapshot();
+    // 无效 token 一律 401，且不区分“格式对但不存在”，避免枚举。
     let rec = state
         .tokens
         .iter()
         .find(|t| t.token_hash == hash)
-        .ok_or_else(|| ApiError::not_found("订阅不存在"))?;
+        .ok_or_else(|| {
+            ApiError::new(401, "subscription_unauthorized", "订阅令牌无效或已被轮换")
+        })?;
     if rec.revoked_at.is_some() {
-        return Err(ApiError::new(403, "revoked", "订阅已被吊销"));
+        store.audit(
+            "sub.revoked_denied",
+            "subscription",
+            json!({"token_id": rec.id, "reason": "revoked"}),
+        );
+        return Err(ApiError::new(403, "revoked", "订阅已被吊销（吊销立即失效）"));
     }
-    let target = query.get("target").cloned().unwrap_or_else(|| rec.target.clone());
-    let format = if target.contains("sing") { "singbox" } else { "clash" };
+
+    let explicit = req
+        .query
+        .get("target")
+        .map(|s| s.as_str())
+        .filter(|s| !s.trim().is_empty());
+    let target = match explicit {
+        Some(raw) => normalize_target(raw).ok_or_else(|| {
+            ApiError::bad_request("target 只支持 mihomo / sing-box")
+                .with_field("target", "mihomo | sing-box")
+        })?,
+        None => target_from_ua(req.header("user-agent").unwrap_or(""))
+            .or_else(|| normalize_target(&rec.target))
+            .unwrap_or("mihomo"),
+    };
+    let format = if target == "sing-box" { "singbox" } else { "clash" };
+
     let mut inbound_ids = Vec::new();
+    let mut client_enabled = true;
+    let mut found_client = false;
     for i in &state.inbounds {
-        if i.clients.iter().any(|c| c.id == rec.client_id) {
+        if let Some(c) = i.clients.iter().find(|c| c.id == rec.client_id) {
+            found_client = true;
+            client_enabled = c.enabled;
             inbound_ids.push(i.id.clone());
         }
     }
-    if inbound_ids.is_empty() {
+    if !found_client {
         return Err(ApiError::not_found("订阅绑定的客户端已不存在"));
     }
+    if !client_enabled {
+        store.audit(
+            "sub.disabled_denied",
+            "subscription",
+            json!({"token_id": rec.id, "reason": "client_disabled"}),
+        );
+        return Err(ApiError::new(
+            403,
+            "client_disabled",
+            "该客户端在 Berthio 中已停用，订阅不再下发",
+        ));
+    }
+
     let sel = Selection {
         format: format.to_string(),
         scenario: "desktop".to_string(),
@@ -1043,19 +1173,82 @@ fn subscription(query: &HashMap<String, String>, token: &str, store: &Store) -> 
         rules: Vec::new(),
     };
     let rendered = export::render(store, sel)?;
+    let overall = rendered
+        .validation
+        .get("overall")
+        .and_then(|v| v.as_str())
+        .unwrap_or("FAIL")
+        .to_string();
+    let render_id = rendered.render_id.clone();
+    let warnings = rendered.warnings.clone();
+    if overall == "FAIL" {
+        let detail = rendered
+            .validation
+            .get("layers")
+            .and_then(|v| v.as_array())
+            .and_then(|layers| {
+                layers
+                    .iter()
+                    .find(|l| l.get("status").and_then(|s| s.as_str()) == Some("FAIL"))
+            })
+            .and_then(|l| l.get("items").and_then(|v| v.as_array()))
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|i| i.get("level").and_then(|s| s.as_str()) == Some("fail"))
+            })
+            .and_then(|i| i.get("message").and_then(|s| s.as_str()))
+            .unwrap_or("")
+            .to_string();
+        store.audit(
+            "sub.blocked",
+            "subscription",
+            json!({"token_id": rec.id, "target": target, "render_id": render_id, "reason": "validation_fail", "detail": detail}),
+        );
+        let mut err = ApiError::new(
+            422,
+            "subscription_blocked",
+            "订阅输出未通过 L0/L1 校验，拒绝下发；修复后重试",
+        )
+        .with_field("render_id", render_id.as_str())
+        .with_field("validation", overall.as_str());
+        if !detail.is_empty() {
+            err = err.with_field("detail", detail.as_str());
+        }
+        return Err(err);
+    }
     let _ = store.update(|st| {
         if let Some(t) = st.tokens.iter_mut().find(|t| t.id == rec.id) {
             t.last_access = Some(util::now_iso());
         }
         Ok(())
     });
-    store.audit("sub.access", "subscription", json!({"token_id": rec.id, "target": target}));
+    store.audit(
+        "sub.access",
+        "subscription",
+        json!({
+            "token_id": rec.id,
+            "target": target,
+            "render_id": render_id,
+            "validation": overall,
+            "clients": 1,
+            "inbounds": rendered.entries,
+        }),
+    );
     let ct = if format == "singbox" {
         "application/json; charset=utf-8"
     } else {
         "text/yaml; charset=utf-8"
     };
-    Ok(Response::text(200, ct, rendered.content).with("X-Berthio-Render-Id", rendered.render_id))
+    Ok(Response::text(200, ct, rendered.content)
+        .with("X-Berthio-Render-Id", render_id)
+        .with("X-Berthio-Target", target)
+        .with("X-Berthio-Validation", overall)
+        .with("Cache-Control", "no-store")
+        .with(
+            "X-Berthio-Warnings",
+            if warnings.is_empty() { "0".to_string() } else { warnings.len().to_string() },
+        ))
 }
 
 fn rulesets_payload(store: &Store) -> serde_json::Value {

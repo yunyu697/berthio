@@ -247,6 +247,7 @@
     bindAuthEvents();
     bindProcessEvents();
     bindExportEvents();
+    bindTokenActions();
     bindMirrorEvents();
     if (DEMO) {
       AUTH.csrf = 'demo-csrf';
@@ -943,9 +944,36 @@
       .then(function (r) {
         var base = (UI.panel && UI.panel.panel_address) ? ('http://' + UI.panel.panel_address) : location.origin;
         $('#export-sub-url').textContent = (DEMO ? '' : base) + r.url;
-        $('#export-tokens').innerHTML = '<div class="kv"><span class="k">token</span><span class="v mono">' + esc(r.token) + '</span></div><div class="table-note">' + esc(r.note || '只展示一次；服务端仅存 SHA-256') + '</div>';
+        var target = UI.export.format === 'singbox' ? 'sing-box' : 'mihomo';
+        var row = '<div class="token-row" data-token-id="' + esc(r.id) + '"><span class="mono mask">' + esc(r.token) + '</span>' +
+          '<span class="badge ' + (target === 'sing-box' ? 'purple' : 'info') + ' plain">' + target + '</span>' +
+          '<div class="row-actions"><button class="btn btn-sm js-rotate-token">轮换</button><button class="btn btn-sm js-revoke-token">吊销</button></div></div>';
+        $('#export-tokens').innerHTML = row + '<div class="table-note">' + esc(r.note || '只展示一次；服务端仅存 SHA-256') + '</div>';
         toast('订阅令牌已生成', r.url);
       }).catch(function (e) { toast('签发失败', e.message); });
+  }
+
+  // 设计稿里的“轮换/吊销”按钮：只操作带 data-token-id 的真实令牌行（静态演示行保持占位）。
+  function bindTokenActions() {
+    document.addEventListener('click', function (e) {
+      var row = e.target && e.target.closest ? e.target.closest('[data-token-id]') : null;
+      if (!row || DEMO) return;
+      var id = row.getAttribute('data-token-id');
+      if (e.target.closest('.js-rotate-token')) {
+        api('/api/export/tokens/' + encodeURIComponent(id) + '/rotate', { method: 'POST' })
+          .then(function (r) {
+            row.querySelector('.mask').textContent = r.token;
+            toast('令牌已轮换', '旧链接立即失效；新 token 仅展示一次');
+          }).catch(function (err) { toast('轮换失败', err.message); });
+      } else if (e.target.closest('.js-revoke-token')) {
+        if (!window.confirm('吊销后该订阅立即失效，且不可撤销。确定吊销？')) return;
+        api('/api/export/tokens/' + encodeURIComponent(id) + '/revoke', { method: 'POST' })
+          .then(function () {
+            row.querySelector('.row-actions').innerHTML = '<span class="badge bad plain">已吊销</span>';
+            toast('令牌已吊销', '该订阅链接立即失效');
+          }).catch(function (err) { toast('吊销失败', err.message); });
+      }
+    });
   }
 
   /* ---------------- 镜像源（M2） ---------------- */
