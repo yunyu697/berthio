@@ -1158,7 +1158,18 @@ tbody tr:hover { background: var(--surface-2); }
 </style>
 <style id="berthio-app-bridge">
 /* M1 接入层：只补交互容器所需的最小样式，不改设计稿既有令牌与组件 */
-#orchestration-card,#node-kernel-map,.pointer-grid,#installed-versions-card,#installable-versions-card,#mirror-card,.cr-module,#download-mirror,#export-group-type-field,#export-rule-provider-field,#export-global-mode-field{display:none}
+#orchestration-card,#node-kernel-map,.pointer-grid,#installed-versions-card,#installable-versions-card,.cr-module,#download-mirror,#export-group-type-field,#export-rule-provider-field,#export-global-mode-field{display:none}
+/* M2 镜像卡：数据全部来自 /api/rulesets/sources，控件为功能所需的最小补充 */
+.mirror-controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.mirror-controls .ctl{display:flex;align-items:center;gap:6px;font-size:var(--fs-aux);color:var(--muted)}
+.mirror-source-badge{white-space:nowrap}
+.mirror-result{margin-top:10px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-box);background:var(--surface);font-size:var(--fs-aux);line-height:1.6}
+.mirror-attempt{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:2px 0;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.mirror-attempt b{color:var(--text);font-family:var(--sans);font-weight:600}
+.mirror-attempt .ok{color:var(--ok)}
+.mirror-attempt .bad{color:var(--warn)}
+.mirror-status.bad{color:var(--warn)}
+.mirror-row-off td{opacity:.55}
 #demo-banner{display:none;margin-bottom:12px;padding:10px 14px;border:1px solid var(--accent-line);border-radius:var(--r-box);background:var(--accent-soft);color:var(--accent-strong);font-size:var(--fs-aux);display:none}
 #demo-banner.show{display:block}
 .wz-overlay{position:fixed;inset:0;z-index:90;display:none;align-items:center;justify-content:center;padding:16px;background:rgba(12,24,34,.46)}
@@ -1968,29 +1979,44 @@ tbody tr:hover { background: var(--surface-2); }
 
         <div class="card" id="mirror-card" style="margin-top:14px">
           <div class="card-head">
-            <div><h3>镜像源</h3><p>官方优先；镜像只做传输加速，校验基准永远来自官方 SHA-256；第三方默认禁用</p></div>
-            <div class="card-actions"><span class="badge muted plain" id="mirror-count">2 个已启用</span></div>
+            <div><h3>镜像源 · 规则集换源下载</h3><p>镜像只做传输加速，校验基准永远来自官方 SHA-256；失败按优先级自动回退</p></div>
+            <div class="card-actions"><span class="badge muted plain" id="mirror-count">—</span></div>
           </div>
           <div class="card-body">
+            <div class="mirror-controls">
+              <label class="ctl">选源模式
+                <select class="select" id="mirror-mode" style="width:200px" aria-label="选源模式"></select>
+              </label>
+              <label class="ctl">格式
+                <select class="select" id="ruleset-fetch-format" style="width:150px" aria-label="规则集格式">
+                  <option value="mihomo">mihomo YAML</option>
+                  <option value="singbox">sing-box SRS</option>
+                </select>
+              </label>
+              <label class="ctl">规则集
+                <select class="select" id="ruleset-fetch-id" style="width:230px" aria-label="要拉取的规则集"></select>
+              </label>
+              <button class="btn btn-soft" id="ruleset-fetch-run">拉取并校验</button>
+              <button class="btn btn-sm" id="mirror-refresh-baseline">刷新官方基准</button>
+              <span class="badge muted plain mirror-source-badge" id="mirror-current">当前源：自动回退</span>
+            </div>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>名称</th><th>URL</th><th>优先级</th><th>启用</th><th>最近状态</th><th style="text-align:right">操作</th></tr></thead>
-                <tbody id="mirror-list">
-                  <tr data-mirror-id="official"><td><div class="cell-main"><b>官方 GitHub Releases</b><span class="badge accent">官方</span></div></td><td><input class="mirror-url" value="https://github.com/MetaCubeX/mihomo/releases" aria-label="镜像 URL"></td><td><input class="mirror-priority" value="1" aria-label="优先级"></td><td><button class="switch on" role="switch" aria-checked="true" aria-label="启用官方源"></button></td><td><span class="mirror-status">正常 · 128 ms</span></td><td><div class="row-actions"><button class="btn btn-sm js-mirror-test" data-name="官方 GitHub Releases">测速</button></div></td></tr>
-                  <tr data-mirror-id="ghproxy"><td><div class="cell-main"><b>ghproxy 加速</b><span class="badge warn">第三方</span></div></td><td><input class="mirror-url" value="https://mirror.example.com/ghproxy" aria-label="镜像 URL"></td><td><input class="mirror-priority" value="2" aria-label="优先级"></td><td><button class="switch on" role="switch" aria-checked="true" aria-label="启用 ghproxy"></button></td><td><span class="mirror-status">正常 · 42 ms</span></td><td><div class="row-actions"><button class="btn btn-sm js-mirror-test" data-name="ghproxy 加速">测速</button><button class="btn btn-sm js-mirror-delete" data-name="ghproxy 加速">删除</button></div></td></tr>
-                  <tr data-mirror-id="s3"><td><div class="cell-main"><b>自建对象存储</b><span class="badge muted">未启用</span></div></td><td><input class="mirror-url" value="https://s3.example.com/berthio" aria-label="镜像 URL"></td><td><input class="mirror-priority" value="3" aria-label="优先级"></td><td><button class="switch" role="switch" aria-checked="false" aria-label="启用自建对象存储"></button></td><td><span class="mirror-status off">已禁用</span></td><td><div class="row-actions"><button class="btn btn-sm js-mirror-test" data-name="自建对象存储">测速</button><button class="btn btn-sm js-mirror-delete" data-name="自建对象存储">删除</button></div></td></tr>
-                </tbody>
+                <thead><tr><th>名称</th><th>URL 模板</th><th>优先级</th><th>启用</th><th>最近状态</th><th style="text-align:right">操作</th></tr></thead>
+                <tbody id="mirror-list"></tbody>
               </table>
             </div>
             <div class="mirror-add">
               <input class="input" id="mirror-name" placeholder="镜像名称，例如：香港中转" aria-label="镜像名称">
-              <input class="input" id="mirror-url-input" placeholder="https://…（只做传输，SHA-256 仍以官方为准）" aria-label="镜像 URL">
-              <select class="select" id="mirror-type"><option>第三方</option><option>官方</option></select>
+              <input class="input" id="mirror-url-input" placeholder="YAML 模板 https://…/{kind}/{id}.yaml（只做传输，SHA-256 仍以官方为准）" aria-label="镜像 YAML URL 模板">
+              <input class="input" id="mirror-srs-input" placeholder="SRS 模板（可选）https://…/{kind}/{id}.srs" aria-label="镜像 SRS URL 模板">
+              <input class="mirror-priority" id="mirror-priority-input" value="6" aria-label="优先级">
               <button class="btn btn-soft" id="mirror-add">添加镜像</button>
             </div>
+            <div class="mirror-result" id="mirror-result"><div class="muted">尚未拉取。点「拉取并校验」会展示每一步的源、耗时与校验结论。</div></div>
             <div class="info-note" style="margin-top:10px">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v.1M12 11v5"></path></svg>
-              校验失败会直接丢弃临时文件并记录事件，不会覆盖现有版本。镜像不可用时自动回退官方源。
+              校验失败的文件直接丢弃、不落盘，也不会覆盖已有缓存。自动模式在已有官方基准时镜像优先，全部失败再回退官方；手动模式只走指定源，失败即报错。
             </div>
           </div>
         </div>

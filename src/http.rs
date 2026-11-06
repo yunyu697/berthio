@@ -3,6 +3,7 @@ use crate::export::{self, Selection};
 use crate::kernels;
 use crate::model::TokenRecord;
 use crate::rulesets;
+use crate::sources;
 use crate::state::{Config, PanelConfig, Store};
 use crate::util;
 use crate::wizard;
@@ -318,7 +319,22 @@ fn route(req: &Request, store: &Store, demo: bool) -> Response {
         ("GET", "/api/panel") => Ok(Response::json(200, &panel_payload(store, demo))),
         ("PATCH", "/api/panel") => patch_panel(req, store),
         ("GET", "/api/kernels") => Ok(Response::json(200, &kernels::report(store))),
-        ("GET", "/api/rulesets") => Ok(Response::json(200, &rulesets_payload())),
+        ("GET", "/api/rulesets") => Ok(Response::json(200, &rulesets_payload(store))),
+        ("GET", "/api/rulesets/sources") => {
+            Ok(Response::json(200, &sources::public_payload(store)))
+        }
+        ("POST", "/api/rulesets/sources") => add_source(req, store),
+        ("POST", "/api/rulesets/sources/test") => test_source(req, store),
+        ("PUT", "/api/rulesets/sources/mode") => set_source_mode(req, store),
+        ("POST", "/api/rulesets/fetch") => fetch_ruleset(req, store),
+        ("PATCH", p) if p.starts_with("/api/rulesets/sources/") => {
+            let id = &p["/api/rulesets/sources/".len()..];
+            patch_source(req, store, id)
+        }
+        ("DELETE", p) if p.starts_with("/api/rulesets/sources/") => {
+            let id = &p["/api/rulesets/sources/".len()..];
+            sources::delete_source(store, id).map(|v| Response::json(200, &v))
+        }
         ("GET", "/api/inbound/inbounds") => Ok(Response::json(200, &inbound_list(store))),
         ("POST", "/api/inbound/inbounds") => create_inbound(req, store),
         ("GET", "/api/inbound/wizard/defaults") => Ok(Response::json(200, &wizard::defaults(store))),
@@ -650,7 +666,8 @@ fn subscription(query: &HashMap<String, String>, token: &str, store: &Store) -> 
     Ok(Response::text(200, ct, rendered.content).with("X-Berthio-Render-Id", rendered.render_id))
 }
 
-fn rulesets_payload() -> serde_json::Value {
+fn rulesets_payload(store: &Store) -> serde_json::Value {
+    let cache = sources::cache_summary(store);
     json!({
         "catalog": rulesets::catalog(),
         "groups": ["直连与私网","广告与恶意","流媒体","AI 与开发","社交","游戏","下载与测速"],
@@ -661,6 +678,7 @@ fn rulesets_payload() -> serde_json::Value {
             {"id":"reject","label":"拒绝"},
             {"id":"off","label":"不启用"}
         ],
+        "cache": cache,
         "sources": {
             "official": {
                 "id":"official",
@@ -669,10 +687,95 @@ fn rulesets_payload() -> serde_json::Value {
                 "enabled": true,
                 "note": "校验基准仍以官方 SHA-256 为准"
             },
-            "mirrors": [],
-            "mirror_note": "M2 接入加速镜像：内置列表 + 自动回退 + 手动指定 + SHA-256 拦截"
+            "mirror_note": "M2 已接入：内置多个加速镜像 + 自动回退 + 手动指定 + 官方 SHA-256 拦截"
         }
     })
+}
+
+fn add_source(req: &Request, store: &Store) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let label = body.get("label").and_then(|v| v.as_str()).unwrap_or("");
+    let url_mihomo = body
+        .get("url_mihomo")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let url_singbox = body
+        .get("url_singbox")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let priority = body
+        .get("priority")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(6) as u32;
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let out = sources::add_source(store, label, url_mihomo, url_singbox, priority, enabled)?;
+    Ok(Response::json(201, &out))
+}
+
+fn patch_source(req: &Request, store: &Store, id: &str) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let enabled = body.get("enabled").and_then(|v| v.as_bool());
+    let priority = body
+        .get("priority")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+    let url_mihomo = body
+        .get("url_mihomo")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string());
+    let url_singbox = body
+        .get("url_singbox")
+        .and_then(|v| v.as_str())
+        .map(|v| v.to_string());
+    let out = sources::patch_source(store, id, enabled, priority, url_mihomo, url_singbox)?;
+    Ok(Response::json(200, &out))
+}
+
+fn test_source(req: &Request, store: &Store) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if id.is_empty() {
+        return Err(ApiError::bad_request("缺少 id"));
+    }
+    let out = sources::test_source(store, id)?;
+    Ok(Response::json(200, &out))
+}
+
+fn set_source_mode(req: &Request, store: &Store) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("auto");
+    let out = sources::set_mode(store, mode)?;
+    Ok(Response::json(200, &out))
+}
+
+fn fetch_ruleset(req: &Request, store: &Store) -> ApiResult<Response> {
+    let body = body_json(req)?;
+    let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let format = body
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mihomo");
+    let source = body
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
+    let refresh = body
+        .get("refresh_baseline")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let out = sources::fetch(
+        store,
+        sources::FetchReq {
+            id: id.to_string(),
+            format: format.to_string(),
+            source: source.to_string(),
+            refresh_baseline: refresh,
+        },
+    )?;
+    Ok(Response::json(200, &out))
 }
 
 fn logs_payload(store: &Store) -> serde_json::Value {

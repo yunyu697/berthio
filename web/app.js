@@ -1,4 +1,4 @@
-/* Berthio 面板前端（M1）
+/* Berthio 面板前端（M2）
  * 单一来源：与设计稿同一套 DOM / 组件；本文件只负责数据接入与交互。
  * 静态 demo 模式通过 window.__BERTHIO_DEMO_DATA__ 注入同一接口形状的假数据，
  * 不另写一套 UI。 */
@@ -35,6 +35,7 @@
 
   var UI = {
     panel: null, inbounds: [], rules: null, kernels: null, logs: null, defaults: null,
+    sources: null, lastFetch: null,
     export: {
       format: 'clash', scenario: 'desktop', bucket: '112',
       rules: {}, order: [], preset: 'daily', nodeSel: {}, preview: null, ack: false, timer: null
@@ -71,15 +72,75 @@
     return { ok: true };
   }
 
+  /* 静态 demo 里的镜像操作：只改内存里的快照数据，展示真实前端交互 */
+  function demoMirror(method, key, body) {
+    if (!FIX.sources) return { ok: true };
+    if (key === '/api/rulesets/fetch') {
+      var fk = (body.id || '') + '|' + (body.format || 'mihomo') + '|' + (body.source || 'auto');
+      var hit = (FIX.fetchResults || {})[fk];
+      if (hit) return clone(hit);
+      return clone({
+        ok: false, id: body.id, format: body.format || 'mihomo', attempts: [],
+        baseline: null, chosen: null, total_ms: 0,
+        note: '演示数据：该组合未预置拉取结果，真实模式下会实际下载并校验'
+      });
+    }
+    if (key === '/api/rulesets/sources/test') {
+      var t = (FIX.sourceTests || {})[body.id];
+      return clone(t || {
+        ok: true, source: body.id, ms: 118, bytes: 532, matches_baseline: true,
+        detail: '演示数据：预置测速结论'
+      });
+    }
+    if (method === 'PUT' && key === '/api/rulesets/sources/mode') {
+      FIX.sources.mode = body.mode;
+      FIX.sources.selected = body.mode;
+      return { ok: true, mode: body.mode };
+    }
+    if (method === 'POST' && key === '/api/rulesets/sources') {
+      var id = 'custom-demo' + String(Math.random()).slice(2, 6);
+      FIX.sources.sources.push({
+        id: id, label: body.label, kind: 'third', locked: false, enabled: true,
+        priority: Number(body.priority) || 6, url_mihomo: body.url_mihomo,
+        url_singbox: body.url_singbox || body.url_mihomo, note: '演示数据', last: null
+      });
+      return { ok: true, id: id };
+    }
+    if (method === 'PATCH' && key.indexOf('/api/rulesets/sources/') === 0) {
+      var pid = decodeURIComponent(key.slice('/api/rulesets/sources/'.length));
+      var ps = FIX.sources.sources.filter(function (x) { return x.id === pid; })[0];
+      if (ps) {
+        if (body.enabled !== undefined) ps.enabled = !!body.enabled;
+        if (body.priority !== undefined) ps.priority = Number(body.priority) || ps.priority;
+        if (body.url_mihomo) ps.url_mihomo = body.url_mihomo;
+        if (body.url_singbox) ps.url_singbox = body.url_singbox;
+      }
+      return { ok: true, id: pid };
+    }
+    if (method === 'DELETE' && key.indexOf('/api/rulesets/sources/') === 0) {
+      var did = decodeURIComponent(key.slice('/api/rulesets/sources/'.length));
+      FIX.sources.sources = FIX.sources.sources.filter(function (x) { return x.id !== did; });
+      return { ok: true, id: did };
+    }
+    return { ok: true };
+  }
+
   function api(path, opts) {
     if (DEMO) {
-      if (opts && opts.method === 'POST') return Promise.resolve(demoPost(path.split('?')[0], JSON.parse(opts.body || '{}')));
+      var key0 = path.split('?')[0];
+      var method0 = (opts && opts.method) || 'GET';
+      if (method0 !== 'GET') {
+        var bod = JSON.parse((opts && opts.body) || '{}');
+        if (key0.indexOf('/api/rulesets/') === 0) return Promise.resolve(demoMirror(method0, key0, bod));
+        return Promise.resolve(demoPost(key0, bod));
+      }
       if (path.indexOf('/api/export/preview') === 0) {
         return Promise.resolve(clone(FIX.exportPreview));
       }
       var key = path.split('?')[0];
       if (key === '/api/logs') return Promise.resolve(clone(FIX.logs));
       if (key === '/api/rulesets') return Promise.resolve(clone(FIX.rulesets));
+      if (key === '/api/rulesets/sources') return Promise.resolve(clone(FIX.sources || { sources: [] }));
       if (key === '/api/kernels') return Promise.resolve(clone(FIX.kernels));
       if (key === '/api/inbound/inbounds') return Promise.resolve({ items: clone(UI.inbounds), total: UI.inbounds.length, kernels: { xray: UI.inbounds.length }, selection: {} });
       if (key === '/api/inbound/wizard/defaults') return Promise.resolve(clone(FIX.defaults));
@@ -172,13 +233,14 @@
     $('#wz-port').addEventListener('input', updateWizardFields);
 
     bindExportEvents();
+    bindMirrorEvents();
     loadAll();
   }
 
   function loadAll() {
     return Promise.all([
       api('/api/panel'), api('/api/inbound/inbounds'), api('/api/rulesets'), api('/api/kernels'), api('/api/logs'),
-      api('/api/inbound/wizard/defaults')
+      api('/api/inbound/wizard/defaults'), api('/api/rulesets/sources')
     ]).then(function (r) {
       UI.panel = r[0];
       UI.inbounds = r[1].items || [];
@@ -186,6 +248,7 @@
       UI.kernels = r[3];
       UI.logs = r[4];
       UI.defaults = r[5];
+      UI.sources = r[6];
       if ((UI.panel && UI.panel.demo) || DEMO) $('#demo-banner').classList.add('show');
       renderChrome();
       renderOverview();
@@ -193,6 +256,7 @@
       renderRulesets();
       renderNodes();
       renderKernels();
+      renderMirrorCard();
       renderLogs();
       renderSettings();
       initExportDefaults();
@@ -227,7 +291,7 @@
     }
     var body = $('#onboard-body');
     if (body) {
-      body.innerHTML = '<div class="onboard-head"><div class="onboard-line"><b>M1 已接通真实接口</b><span>入站列表 / 新建向导 / 导出 / 内核探测</span></div><span class="badge info plain">' + esc(p.version || '') + '</span></div>' +
+      body.innerHTML = '<div class="onboard-head"><div class="onboard-line"><b>M2 已接入规则集镜像换源</b><span>入站列表 / 新建向导 / 导出 / 内核探测 / 官方 SHA-256 校验</span></div><span class="badge info plain">' + esc(p.version || '') + '</span></div>' +
         '<div class="onboard-steps">' +
         '<div class="onboard-step"><i>1</i><div><b>新建第一个入站</b><span>Reality 密钥由后端生成，私钥只落盘</span></div></div>' +
         '<div class="onboard-step"><i>2</i><div><b>导出可校验的配置</b><span>L0/L1/L2，缺失二进制标未验证</span></div></div>' +
@@ -248,12 +312,12 @@
       statCard('入站数量', inb.length + ' <small>个</small>', '启用 ' + enabledIn + ' · 停用 ' + (inb.length - enabledIn), 'info') +
       statCard('客户端', clients + ' <small>个</small>', '全部用于导出与订阅', 'ok') +
       statCard('已探测内核', present.length + '/3', present.length ? present.map(function (b) { return b.name + ' ' + (b.version || '?'); }).join(' · ') : '未找到任何二进制', 'muted') +
-      statCard('规则集', total + ' <small>条</small>', '官方源 · 镜像选源在 M2', 'accent');
+      statCard('规则集', total + ' <small>条</small>', '官方基准 · 已缓存 ' + (((UI.rules || {}).cache || {}).count || 0) + ' 条 · 镜像可选', 'accent');
   }
 
   function statCard(label, value, foot, kind) {
     return '<div class="stat"><div class="stat-top"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M12 3v3M12 18v3M3 12h3M18 12h3"></path></svg>' +
-      label + '<span class="badge ' + kind + ' plain">M1</span></div><div class="stat-value">' + value + '</div>' +
+      label + '<span class="badge ' + kind + ' plain">M2</span></div><div class="stat-value">' + value + '</div>' +
       '<div class="stat-foot"><span>' + esc(foot) + '</span></div></div>';
   }
 
@@ -400,9 +464,9 @@
     if (step === 4) {
       return p.security === 'reality'
         ? 'Reality：提交时生成 X25519 密钥对与 shortId；私钥只写入 state/state.json，API 只返回公钥标识。'
-        : 'TLS：M1 只记录自签证书路径占位，不生成证书、不写系统目录。';
+        : 'TLS：当前版本只记录自签证书路径占位，不生成证书、不写系统目录。';
     }
-    if (step === 5) return '防火墙：M1 不写宿主规则，只在事务摘要里标 skipped；需要开放端口请自行在云安全组处理。';
+    if (step === 5) return '防火墙：当前版本不写宿主规则，只在事务摘要里标 skipped；需要开放端口请自行在云安全组处理。';
     if (step === 6) return '提交后写入 state/state.json（原子替换 + .bak），并写审计事件 inbound.wizard.committed。';
     return '';
   }
@@ -523,13 +587,19 @@
         var on = UI.export.rules[r.id] && UI.export.rules[r.id] !== 'off';
         var idx = UI.export.order.indexOf(r.id) + 1;
         var size = UI.export.format === 'singbox' ? r.srs_bytes : r.mihomo_bytes;
+        var cached = cacheFor(r.id, UI.export.format);
+        var srcLabel = cached ? ('← ' + sourceLabel(cached.source) + (cached.matches_baseline ? ' · 已校验' : ' · 基准已更新')) : '← 官方源（未缓存）';
+        var cacheLine = cached
+          ? '<div>缓存：<span class="mono">' + esc(cached.path) + '</span> · ' + fmtBytes(cached.size) + ' · ' + esc(cached.saved_at) + '</div>' +
+            '<div>SHA-256：<span class="mono">' + esc((cached.sha256 || '').slice(0, 32)) + '…</span></div>'
+          : '<div>缓存：尚未下载（导出时客户端仍会指向官方 URL）</div>';
         html += '<div class="rs-row" data-rule-id="' + esc(r.id) + '">' +
           '<span class="rs-idx">' + (on ? idx : '—') + '</span>' +
-          '<div class="rs-main"><b>' + esc(r.display) + '</b><span class="rs-id">' + esc(r.real_id) + '</span><span class="rs-meta">' + fmtBytes(size) + '</span><span class="rs-src">← 官方源</span></div>' +
+          '<div class="rs-main"><b>' + esc(r.display) + '</b><span class="rs-id">' + esc(r.real_id) + '</span><span class="rs-meta">' + fmtBytes(size) + '</span><span class="rs-src">' + srcLabel + '</span></div>' +
           '<select class="select rs-act" data-rule="' + esc(r.id) + '">' + acts.map(function (a) {
             return '<option value="' + a.id + '"' + ((UI.export.rules[r.id] || 'off') === a.id ? ' selected' : '') + '>' + esc(a.label) + '</option>';
           }).join('') + '</select>' +
-          '<details class="rs-detail"><summary>详情</summary><div class="rs-detail-body"><div>官方：<span class="mono">https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat</span></div><div>镜像：M2 接入（SHA-256 以官方为准）</div></div></details>' +
+          '<details class="rs-detail"><summary>详情</summary><div class="rs-detail-body"><div>官方：<span class="mono">https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat</span></div>' + cacheLine + '<div>校验：镜像内容须与官方 SHA-256 基准一致才落盘</div></div></details>' +
           '</div>';
       });
       html += '</div></details>';
@@ -856,6 +926,184 @@
         $('#export-tokens').innerHTML = '<div class="kv"><span class="k">token</span><span class="v mono">' + esc(r.token) + '</span></div><div class="table-note">' + esc(r.note || '只展示一次；服务端仅存 SHA-256') + '</div>';
         toast('订阅令牌已生成', r.url);
       }).catch(function (e) { toast('签发失败', e.message); });
+  }
+
+  /* ---------------- 镜像源（M2） ---------------- */
+  function cacheFor(id, format) {
+    var items = ((UI.rules || {}).cache || {}).items || [];
+    for (var i = 0; i < items.length; i++) if (items[i].key === format + ':' + id) return items[i];
+    return null;
+  }
+
+  function sourceLabel(id) {
+    var list = (UI.sources && UI.sources.sources) || [];
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i].label;
+    return id;
+  }
+
+  function statusText(s) {
+    if (!s.enabled) return '<span class="mirror-status off">已禁用</span>';
+    if (!s.last) return '<span class="mirror-status off">未测试</span>';
+    var l = s.last;
+    if (l.status === 'ok') return '<span class="mirror-status">正常 · ' + l.ms + ' ms</span>';
+    var txt = l.status === 'hash_mismatch' ? '校验失败' : (l.status === 'no_baseline' ? '缺基准' : '失败');
+    return '<span class="mirror-status bad" title="' + esc(l.detail || '') + '">' + txt + ' · ' + l.ms + ' ms</span>';
+  }
+
+  function renderMirrorCard() {
+    if (!UI.sources) return;
+    var srcs = UI.sources.sources || [];
+    var on = srcs.filter(function (s) { return s.enabled; }).length;
+    if ($('#mirror-count')) $('#mirror-count').textContent = on + ' / ' + srcs.length + ' 已启用';
+
+    var modeSel = $('#mirror-mode');
+    if (modeSel) {
+      modeSel.innerHTML = '<option value="auto">自动回退（镜像优先，官方兜底）</option>' +
+        srcs.filter(function (s) { return s.enabled; }).map(function (s) {
+          return '<option value="' + esc(s.id) + '">手动 · ' + esc(s.label) + '</option>';
+        }).join('');
+      var want = UI.sources.mode || 'auto';
+      modeSel.value = want;
+      if (modeSel.value !== want) modeSel.value = 'auto';
+    }
+    var cur = $('#mirror-current');
+    if (cur) cur.textContent = '当前源：' + (UI.sources.mode === 'auto' || !UI.sources.mode ? '自动回退' : sourceLabel(UI.sources.mode));
+
+    var idSel = $('#ruleset-fetch-id');
+    if (idSel) {
+      var catalog = (UI.rules && UI.rules.catalog) || [];
+      var prev = idSel.value || 'geoip:private';
+      idSel.innerHTML = catalog.map(function (r) {
+        return '<option value="' + esc(r.id) + '">' + esc(r.display) + ' · ' + esc(r.id) + '</option>';
+      }).join('');
+      if (catalog.some(function (r) { return r.id === prev; })) idSel.value = prev;
+    }
+
+    var box = $('#mirror-list');
+    if (!box) return;
+    box.innerHTML = srcs.map(function (s) {
+      var badge = s.locked ? '<span class="badge accent">官方</span>'
+        : (s.enabled ? '<span class="badge warn">第三方</span>' : '<span class="badge muted">未启用</span>');
+      var ro = s.locked ? ' readonly' : '';
+      return '<tr data-mirror-id="' + esc(s.id) + '" class="' + (s.enabled ? '' : 'mirror-row-off') + '">' +
+        '<td><div class="cell-main"><b>' + esc(s.label) + '</b>' + badge + '</div><div class="table-note">' + esc(s.note || '') + '</div></td>' +
+        '<td><input class="mirror-url" data-url="' + esc(s.id) + '" value="' + esc(s.url_mihomo) + '" aria-label="镜像 URL"' + ro + '></td>' +
+        '<td><input class="mirror-priority" data-priority="' + esc(s.id) + '" value="' + s.priority + '" aria-label="优先级"' + ro + '></td>' +
+        '<td><button class="switch ' + (s.enabled ? 'on' : '') + '" role="switch" aria-checked="' + (s.enabled ? 'true' : 'false') + '" data-toggle="' + esc(s.id) + '" aria-label="启用 ' + esc(s.label) + '"' + (s.locked ? ' disabled' : '') + '></button></td>' +
+        '<td>' + statusText(s) + '</td>' +
+        '<td><div class="row-actions"><button class="btn btn-sm" data-test="' + esc(s.id) + '">测速</button>' +
+        (s.locked ? '' : '<button class="btn btn-sm" data-del="' + esc(s.id) + '">删除</button>') + '</div></td></tr>';
+    }).join('') || '<tr><td colspan="6" class="muted">没有配置任何源</td></tr>';
+
+    renderFetchResult(UI.lastFetch);
+  }
+
+  function renderFetchResult(r) {
+    var box = $('#mirror-result');
+    if (!box) return;
+    if (!r) {
+      box.innerHTML = '<div class="muted">尚未拉取。点「拉取并校验」会展示每一步的源、耗时与校验结论。</div>';
+      return;
+    }
+    var head = r.ok
+      ? '<span class="badge ok">通过</span> <b>' + esc(r.id) + '</b> 由 <b>' + esc((r.chosen || {}).label || '') + '</b> 提供 · 总耗时 ' + r.total_ms + ' ms · ' + fmtBytes((r.chosen || {}).bytes || 0)
+      : '<span class="badge warn">未通过</span> <b>' + esc(r.id || '') + '</b> · 未落盘';
+    var lines = (r.attempts || []).map(function (a) {
+      var cls = a.status === 'ok' ? 'ok' : 'bad';
+      var tail = a.status === 'ok'
+        ? (a.bytes ? fmtBytes(a.bytes) + ' · ' : '') + (a.role === 'baseline' ? '官方基准' : '匹配官方基准')
+        : esc(a.detail || a.status);
+      return '<div class="mirror-attempt"><b>' + esc(a.label || a.source) + '</b><span class="' + cls + '">' + esc(a.status) + '</span><span>' + a.ms + ' ms</span><span class="muted">' + tail + '</span></div>';
+    }).join('');
+    if (!lines && r.error) lines = '<div class="mirror-attempt"><span class="bad">' + esc(r.error.code) + '</span><span>' + esc(r.error.message) + '</span></div>';
+    var base = r.baseline
+      ? '<div class="muted">官方基准 SHA-256：<span class="mono">' + esc(r.baseline.sha256.slice(0, 32)) + '…</span> · ' + esc(r.baseline.fetched_at) + '</div>'
+      : '<div class="muted">尚无官方基准</div>';
+    box.innerHTML = '<div style="margin-bottom:6px">' + head + '</div>' + (lines || '<div class="muted">没有尝试记录</div>') + base + '<div class="muted" style="margin-top:6px">' + esc(r.note || '') + '</div>';
+  }
+
+  function refreshSources() {
+    return api('/api/rulesets/sources').then(function (s) {
+      UI.sources = s;
+      renderMirrorCard();
+      return s;
+    });
+  }
+
+  function runRulesetFetch(refreshBaseline) {
+    var id = $('#ruleset-fetch-id') ? $('#ruleset-fetch-id').value : 'geoip:private';
+    var format = $('#ruleset-fetch-format') ? $('#ruleset-fetch-format').value : 'mihomo';
+    var mode = $('#mirror-mode') ? $('#mirror-mode').value : 'auto';
+    var btn = refreshBaseline ? $('#mirror-refresh-baseline') : $('#ruleset-fetch-run');
+    if (btn) btn.disabled = true;
+    var body = { id: id, format: format, source: refreshBaseline ? 'official' : (mode || 'auto'), refresh_baseline: !!refreshBaseline };
+    api('/api/rulesets/fetch', { method: 'POST', body: JSON.stringify(body) })
+      .then(function (r) {
+        UI.lastFetch = r;
+        renderFetchResult(r);
+        toast(r.ok ? '拉取并校验通过' : '拉取未通过', r.ok ? ((r.chosen || {}).label + ' · ' + r.total_ms + ' ms') : '详见回退链');
+        return Promise.all([refreshSources(), api('/api/rulesets')]);
+      }).then(function (rs) {
+        UI.rules = rs[1];
+        renderRulesets();
+        renderOverview();
+      }).catch(function (e) { toast('拉取失败', e.message); })
+      .then(function () { if (btn) btn.disabled = false; });
+  }
+
+  function bindMirrorEvents() {
+    var list = $('#mirror-list');
+    if (!list) return;
+    list.addEventListener('click', function (e) {
+      var t = e.target.closest('button');
+      if (!t) return;
+      if (t.dataset.toggle) {
+        var sid = t.dataset.toggle;
+        var cur = (UI.sources.sources.filter(function (s) { return s.id === sid; })[0] || {}).enabled;
+        api('/api/rulesets/sources/' + encodeURIComponent(sid), { method: 'PATCH', body: JSON.stringify({ enabled: !cur }) })
+          .then(refreshSources).catch(function (err) { toast('修改失败', err.message); });
+      } else if (t.dataset.test) {
+        var id = t.dataset.test;
+        t.disabled = true;
+        api('/api/rulesets/sources/test', { method: 'POST', body: JSON.stringify({ id: id }) })
+          .then(function (r) {
+            toast(r.ok ? '测速通过' : '测速失败', (r.ok ? (r.ms + ' ms · ' + fmtBytes(r.bytes || 0)) : r.detail) + ' · ' + (r.detail || ''));
+            return refreshSources();
+          }).catch(function (err) { toast('测速失败', err.message); })
+          .then(function () { t.disabled = false; });
+      } else if (t.dataset.del) {
+        if (!confirm('删除镜像「' + t.dataset.del + '」？')) return;
+        api('/api/rulesets/sources/' + encodeURIComponent(t.dataset.del), { method: 'DELETE' })
+          .then(refreshSources).catch(function (err) { toast('删除失败', err.message); });
+      }
+    });
+    list.addEventListener('change', function (e) {
+      var t = e.target;
+      if (t.dataset.priority) {
+        api('/api/rulesets/sources/' + encodeURIComponent(t.dataset.priority), { method: 'PATCH', body: JSON.stringify({ priority: Number(t.value) || 6 }) })
+          .then(refreshSources).catch(function (err) { toast('修改失败', err.message); });
+      } else if (t.dataset.url) {
+        api('/api/rulesets/sources/' + encodeURIComponent(t.dataset.url), { method: 'PATCH', body: JSON.stringify({ url_mihomo: t.value }) })
+          .then(refreshSources).catch(function (err) { toast('修改失败', err.message); });
+      }
+    });
+    if ($('#mirror-mode')) $('#mirror-mode').addEventListener('change', function () {
+      api('/api/rulesets/sources/mode', { method: 'PUT', body: JSON.stringify({ mode: this.value }) })
+        .then(refreshSources).catch(function (err) { toast('切换失败', err.message); });
+    });
+    if ($('#mirror-add')) $('#mirror-add').addEventListener('click', function () {
+      var label = ($('#mirror-name').value || '').trim();
+      var url = ($('#mirror-url-input').value || '').trim();
+      var srs = ($('#mirror-srs-input').value || '').trim();
+      var pr = Number($('#mirror-priority-input').value) || 6;
+      if (!label || !url) { toast('请填写名称和 URL 模板', '模板里可用 {kind} 与 {id} 占位'); return; }
+      api('/api/rulesets/sources', { method: 'POST', body: JSON.stringify({ label: label, url_mihomo: url, url_singbox: srs, priority: pr, enabled: true }) })
+        .then(function () { $('#mirror-name').value = ''; $('#mirror-url-input').value = ''; $('#mirror-srs-input').value = ''; return refreshSources(); })
+        .then(function () { toast('镜像已添加', label); })
+        .catch(function (err) { toast('添加失败', err.message); });
+    });
+    if ($('#ruleset-fetch-run')) $('#ruleset-fetch-run').addEventListener('click', function () { runRulesetFetch(false); });
+    if ($('#mirror-refresh-baseline')) $('#mirror-refresh-baseline').addEventListener('click', function () { runRulesetFetch(true); });
   }
 
   /* ---------------- 内核 ---------------- */

@@ -17,14 +17,41 @@ if (-not $OutDir) { $OutDir = Join-Path $root ("demo\" + $Milestone) }
 function Get-Json([string]$path) {
   Invoke-RestMethod -Uri ($BaseUrl + $path) -Method Get
 }
+function Post-Json([string]$path, $obj) {
+  $json = $obj | ConvertTo-Json -Compress
+  Invoke-RestMethod -Uri ($BaseUrl + $path) -Method Post -ContentType 'application/json; charset=utf-8' `
+    -Body ([System.Text.Encoding]::UTF8.GetBytes($json))
+}
 
 Write-Host "[demo] 采集快照: $BaseUrl"
 $panel    = Get-Json "/api/panel"
 $inbounds = Get-Json "/api/inbound/inbounds"
-$rulesets = Get-Json "/api/rulesets"
 $kernels  = Get-Json "/api/kernels"
 $logs     = Get-Json "/api/logs"
 $defaults = Get-Json "/api/inbound/wizard/defaults"
+
+# --- M2：真实换源下载（会真的走网络，demo 里展示的是当时的真实耗时与校验结论）---
+Write-Host "[demo] 采集镜像换源结果（真实下载 + SHA-256 校验）"
+function Fetch([string]$id, [string]$format, [string]$source) {
+  Post-Json "/api/rulesets/fetch" @{ id = $id; format = $format; source = $source }
+}
+$fetchResults = [ordered]@{}
+$fetchResults["geoip:private|mihomo|official"] = Fetch "geoip:private" "mihomo" "official"
+$fetchResults["geoip:private|mihomo|auto"] = Fetch "geoip:private" "mihomo" "auto"
+$fetchResults["geoip:private|singbox|official"] = Fetch "geoip:private" "singbox" "official"
+$fetchResults["geoip:private|singbox|ghproxy-net"] = Fetch "geoip:private" "singbox" "ghproxy-net"
+$fetchResults["geosite:youtube|mihomo|official"] = Fetch "geosite:youtube" "mihomo" "official"
+$fetchResults["geosite:youtube|mihomo|jsdelivr"] = Fetch "geosite:youtube" "mihomo" "jsdelivr"
+
+# 每个启用源的测速结论（写入 last 状态，界面“最近状态”列用真实数据）
+$sourcesNow = Get-Json "/api/rulesets/sources"
+$sourceTests = [ordered]@{}
+foreach ($s in $sourcesNow.sources) {
+  if (-not $s.enabled) { continue }
+  $sourceTests[$s.id] = Post-Json "/api/rulesets/sources/test" @{ id = $s.id }
+}
+$sources = Get-Json "/api/rulesets/sources"
+$rulesets = Get-Json "/api/rulesets"
 
 # 每个入站的客户端单独取，拼成 clients 映射
 $clients = @{}
@@ -63,6 +90,9 @@ $fixture = [ordered]@{
   defaults      = $defaults
   clients       = $clients
   exportPreview = $preview
+  sources       = $sources
+  sourceTests   = $sourceTests
+  fetchResults  = $fetchResults
 }
 $fixtureJson = $fixture | ConvertTo-Json -Depth 24 -Compress
 # 防止 JSON 串里出现 </script> 提前闭合

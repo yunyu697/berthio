@@ -5,6 +5,7 @@ mod http;
 mod kernels;
 mod model;
 mod rulesets;
+mod sources;
 mod state;
 mod util;
 mod wizard;

@@ -1,6 +1,6 @@
 [package]
 name = "berthio"
-version = "1.0.0-alpha1"
+version = "1.0.0-alpha2"
 edition = "2021"
 rust-version = "1.85"
 description = "Berthio 服务端入站代理面板（控制面）"
@@ -18,6 +18,8 @@ sha2 = "0.10"
 base64 = "0.22"
 getrandom = "0.2"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+# 规则集换源下载需要 HTTPS；ureq + rustls（不依赖系统 OpenSSL），便于 Windows/CI 一致。
+ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] }
 
 [profile.release]
 opt-level = "s"
