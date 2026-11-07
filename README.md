@@ -145,7 +145,7 @@ cargo build --release
    - `berthio-<版本>-linux-x86_64`
    - `berthio-<版本>-windows-x86_64.exe`
 2. 用同一 Release 的 `SHA256SUMS` 校验下载结果（Linux 可用 `sha256sum -c SHA256SUMS`）。
-3. 赋予可执行权限后直接运行。仓库不附带安装包、系统服务单元或容器镜像；需要常驻时请用系统的进程管理器自行托管。
+3. 赋予可执行权限后直接运行。仓库不附带安装包与容器镜像；需要常驻时可用下面的「一键脚本」，或自行用系统的进程管理器托管。
 
 Linux 发布二进制以 Debian 12（glibc 2.36）为基线构建，更老的发行版可能无法运行。
 
@@ -159,6 +159,68 @@ Linux 发布二进制以 Debian 12（glibc 2.36）为基线构建，更老的发
 | `BERTHIO_LISTEN` | 覆盖面板监听地址 |
 | `BERTHIO_DEMO_PORT` | 演示模式端口，默认 `18090` |
 | `BERTHIO_KERNEL_DIR` | 使用外部内核目录，而不是面板管理的内核 |
+
+## 一键脚本
+
+仓库提供 Linux（systemd）与 Windows 两套等价脚本，安装、更新、卸载各一份：
+
+| 平台 | 安装 | 更新 | 卸载 |
+|---|---|---|---|
+| Linux | [`scripts/install.sh`](scripts/install.sh) | [`scripts/update.sh`](scripts/update.sh) | [`scripts/uninstall.sh`](scripts/uninstall.sh) |
+| Windows | [`scripts/install.ps1`](scripts/install.ps1) | [`scripts/update.ps1`](scripts/update.ps1) | [`scripts/uninstall.ps1`](scripts/uninstall.ps1) |
+
+公共逻辑在 [`scripts/lib/`](scripts/lib/)（版本比较、`latest.json` 解析、SHA-256 与 minisign 校验、下载镜像回退），三个脚本共用同一套，不各写一份。
+
+### 安装
+
+```bash
+# 在线安装最新正式版
+sudo bash scripts/install.sh
+
+# 本地离线包（同目录需有 SHA256SUMS 与 latest.json）
+sudo bash scripts/install.sh --package /path/berthio-1.0.3-linux-x86_64
+
+# 只看计划
+sudo bash scripts/install.sh --dry-run
+```
+
+流程：先把安装包下载到临时目录，逐个对照 `SHA256SUMS` 校验 SHA-256、用内嵌 minisign 公钥验签并核对 trusted comment 里的 `version` / `file`，**三项全部通过后才写入程序目录**；任何一项不通过立即中止，不会出现「先装后验」。随后创建专用系统用户、数据目录，写入 `berthio.service` 并 `enable` / `restart`，最后回读二进制版本。重复执行不会产生重复用户、重复 unit 或重复文件：同版本时只校正权限与 unit 内容。
+
+Windows 版对应命令（服务注册需要管理员权限）：
+
+```powershell
+pwsh -File scripts/install.ps1                       # 在线安装
+pwsh -File scripts/install.ps1 -Package .\berthio-1.0.3-windows-x86_64.exe
+pwsh -File scripts/install.ps1 -DryRun
+```
+
+Windows 使用系统服务（LocalSystem 账号）托管，数据目录默认 `%ProgramData%\Berthio`；`-NoService` 只落文件、不注册服务，便于测试或自行托管进程。
+
+### 更新
+
+```bash
+sudo bash scripts/update.sh            # 对比 latest.json，仅在更高版本时动作
+sudo bash scripts/update.sh --dry-run
+```
+
+只复用已发布的 `updates/latest.json`，不另造版本判定：当前版本等于清单版本时直接退出，更高时拒绝降级。升级前把旧二进制保留为 `berthio.prev-<旧版本>`，替换后重启服务并轮询 `/healthz` 确认版本；超时或版本不符则自动把旧二进制搬回、重启并再次回读，失败原因打印到 stderr。Windows 版为 `pwsh -File scripts/update.ps1`，服务模式下同样回滚。
+
+### 卸载
+
+```bash
+sudo bash scripts/uninstall.sh                     # 停服务、删 unit、删程序目录；保留数据
+sudo bash scripts/uninstall.sh --purge             # 额外删数据，先逐条打印绝对路径并二次确认
+sudo bash scripts/uninstall.sh --purge --confirm-purge=DELETE   # 非交互
+sudo bash scripts/uninstall.sh --dry-run
+```
+
+**默认不删数据**：`config/panel.json`、`auth.json`、`state.json` 与备份都留在数据目录，重装后可直接接续。`--purge` 会先打印将要删除的每条绝对路径，交互模式下要求输入 `yes`，非交互模式必须显式给出 `--confirm-purge=DELETE`；删除前逐条做危险路径校验，拒绝 `/`、盘符根、系统目录、主目录及其祖先，也不接受通配符，只删脚本自己推导出的白名单路径。系统用户默认保留（它拥有保留的数据目录），`--purge` 时一并删除。
+
+Windows 版：`pwsh -File scripts/uninstall.ps1 [-Purge -ConfirmPurge DELETE] [-DryRun]`。
+
+### 依赖与参数
+
+Linux 需要 `curl`、`sha256sum`、`base64`、`systemd`，以及 `minisign`（Debian/Ubuntu：`apt install minisign`）和 `python3` 或 `jq` 之一；缺任何一项会在动作前报错退出。常用参数：`--prefix`（程序目录，默认 `/opt/berthio`）、`--data-dir`（默认 `/var/lib/berthio`）、`--service-name`、`--user`、`--listen`、`--checksums`、`--manifest`，每个脚本的 `--help` 有完整列表。脚本不写死任何个人路径，仓库地址也可用 `BERTHIO_REPO` 覆盖。
 
 ## 配置与状态文件位置
 
