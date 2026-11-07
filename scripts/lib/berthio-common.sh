@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Berthio 安装/更新/卸载脚本的公共函数。不要直接执行本文件。
 # 设计约束：不写死任何个人路径；只依赖 curl、sha256sum、minisign 与 python3（或 jq）。
+# 本文件里的部分全局变量由 source 它的脚本读取，因此关闭未使用告警。
+# shellcheck disable=SC2034
 
 # 仓库与发布通道（可用环境变量覆盖，便于镜像/分支测试）
 BERTHIO_REPO="${BERTHIO_REPO:-yunyu697/berthio}"

@@ -78,7 +78,6 @@ trap cleanup EXIT
 # ---------------------------------------------------------------- 解析来源
 VERSION=""
 VERIFIED_PKG=""
-VERIFIED_NAME=""
 if [ -n "$PKG" ]; then
     log "来源：本地离线包 $PKG"
     if [ "$DRY_RUN" -eq 1 ]; then

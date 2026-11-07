@@ -14,7 +14,6 @@ usage() {
 
   --health-url <URL>   重启后回读版本的地址（默认 $HEALTH_URL）
   --prefix <目录>      程序目录（默认 $INSTALL_DIR）
-  --service-dir <目录> systemd unit 目录（默认 $SERVICE_DIR）
   --service-name <名>  服务名（默认 $SERVICE_NAME）
   --dry-run            只打印将要做的事，不下载、不替换、不重启
   -h, --help           显示本帮助
@@ -28,8 +27,7 @@ while [ $# -gt 0 ]; do
         --dry-run) DRY_RUN=1 ;;
         --health-url) HEALTH_URL=${2:?--health-url 需要参数}; shift ;;
         --prefix) INSTALL_DIR=${2:?--prefix 需要参数}; BIN_PATH="$INSTALL_DIR/berthio"; shift ;;
-        --service-dir) SERVICE_DIR=${2:?--service-dir 需要参数}; UNIT_PATH="$SERVICE_DIR/$SERVICE_NAME.service"; shift ;;
-        --service-name) SERVICE_NAME=${2:?--service-name 需要参数}; UNIT_PATH="$SERVICE_DIR/$SERVICE_NAME.service"; shift ;;
+        --service-name) SERVICE_NAME=${2:?--service-name 需要参数}; shift ;;
         -h|--help) usage; exit 0 ;;
         *) usage_error "未知参数：$1" ;;
     esac
@@ -97,8 +95,8 @@ health_version() {
 }
 
 wait_for_version() {
-    local want=$1 i
-    for i in $(seq 1 15); do
+    local want=$1
+    for _ in $(seq 1 15); do
         if [ "$(health_version)" = "$want" ]; then return 0; fi
         sleep 2
     done

@@ -34,7 +34,7 @@ while [ $# -gt 0 ]; do
         --purge) PURGE=1 ;;
         --confirm-purge) CONFIRM=${2:?--confirm-purge 需要参数}; shift ;;
         --confirm-purge=*) CONFIRM=${1#--confirm-purge=} ;;
-        --prefix) INSTALL_DIR=${2:?--prefix 需要参数}; BIN_PATH="$INSTALL_DIR/berthio"; shift ;;
+        --prefix) INSTALL_DIR=${2:?--prefix 需要参数}; shift ;;
         --data-dir) DATA_DIR=${2:?--data-dir 需要参数}; shift ;;
         --service-dir) SERVICE_DIR=${2:?--service-dir 需要参数}; UNIT_PATH="$SERVICE_DIR/$SERVICE_NAME.service"; shift ;;
         --service-name) SERVICE_NAME=${2:?--service-name 需要参数}; UNIT_PATH="$SERVICE_DIR/$SERVICE_NAME.service"; shift ;;
@@ -60,7 +60,7 @@ DATA_DIR=$(normalize_dir "$DATA_DIR")
 UNIT_PATH=${UNIT_PATH%/}
 
 is_dangerous_path() {
-    local path=$1 p home user_home
+    local path=$1 p home
     case "$path" in
         /*) ;;
         *) return 0 ;;
