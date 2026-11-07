@@ -50,7 +50,10 @@ build-linux:
   script:
     - cargo build --release --locked
     - bash scripts/check-version.sh --binary ./target/release/berthio
-    - strings target/release/berthio | grep -q "berthio-app-bridge"
+    # 不直接 `strings | grep -q`：grep 提前退出会让 strings 收到 SIGPIPE，
+    # GitLab runner 下 job 以 141 结束。
+    - strings target/release/berthio > /tmp/berthio-strings.txt
+    - grep -q "berthio-app-bridge" /tmp/berthio-strings.txt
     - test -f web/index.html
     - test -f web/app.js
   artifacts:
