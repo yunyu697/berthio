@@ -19,7 +19,9 @@ variables:
   GIT_DEPTH: "0"
 
 default:
-  image: rust:1.85-bookworm
+  # 跟随官方 rust 镜像的最新 stable。不能用 1.85：Cargo.lock 里的 icu 2.4.0、
+  # time 0.3.55 等依赖要求 rustc >= 1.88，--locked 下无法降级。
+  image: rust:bookworm
   before_script:
     - rustc --version
     - cargo --version
