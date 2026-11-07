@@ -1,0 +1,26 @@
+[1m[92m   Compiling[0m berthio v1.0.3-alpha3 (D:\Users\Tyler Zhang\Documents\Trae-CN\temp_20261105_04\berthio)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 8.28s
+[1m[92m     Running[0m unittests src\main.rs (D:\Users\Tyler Zhang\Documents\Trae-CN\temp_20261105_09\cargo-target\debug\deps\berthio-d371655b240d68ba.exe)
+
+running 4 tests
+test capability::tests::intentional_absent_are_documented ... ok
+test capability::tests::matrix_entries_are_unique ... ok
+test capability::tests::backend_routes_match_matrix ... FAILED
+test capability::tests::frontend_entries_match_matrix ... ok
+
+failures:
+
+---- capability::tests::backend_routes_match_matrix stdout ----
+
+thread 'capability::tests::backend_routes_match_matrix' (26976) panicked at src\capability.rs:580:9:
+路由表与能力清单不一致（1 项）：
+inbound.client.delete 缺少后端路由探针：("DELETE", p) if p.starts_with("/api/inbound/inbounds/") && p.contains("/clients/")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    capability::tests::backend_routes_match_matrix
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.01s
+
+[1m[91merror[0m: test failed, to rerun pass `--bin berthio`

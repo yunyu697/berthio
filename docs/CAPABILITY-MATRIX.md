@@ -67,8 +67,9 @@
 |---|---|---|---|
 | 查状态 | 仅后端 | `GET /api/tls` | 证书信息随 `GET /api/panel` 返回 |
 | 生成 / 重新签发 | 必需 | `POST /api/tls/generate` | 设置页「一键自签」（重签=再点一次） |
-| 启用/停用 | 必需 | `PATCH /api/panel`（`tls_enabled`） | 设置页开关 |
 | 删除证书 | 必需 | `DELETE /api/tls/cert?confirm=delete` | 设置页「删除证书」+ 弹窗二次确认；删除前走 `src/safety.rs`，目标必须在数据目录内 |
+
+TLS 启用/停用与明文策略由 `PATCH /api/panel`（`tls_enabled` 等字段）承载，归入「面板设置 · 改」，不单独计一项。
 
 ## 订阅令牌（export.token）
 
@@ -87,7 +88,7 @@
 | 查状态 | 必需 | `GET /api/auth/status` | 登录页/面板 |
 | 初始化 | 必需 | `POST /api/auth/setup` | 首次设置 |
 | 登录 | 必需 | `POST /api/auth/login` | 登录页 |
-| 登出 | 必需 | `POST /api/auth/logout` | — |
+| 登出 | 仅后端 | `POST /api/auth/logout` | —（当前无退出按钮，需清 Cookie 或等会话过期） |
 | 改密 | 必需 | `POST /api/auth/password` | 设置页「修改口令」 |
 | 新增第二个用户 | 有意不做 | — | 单用户设计：一个实例只维护一份口令记录 |
 | 删除用户 | 有意不做 | — | 同上；改密即等同于重置凭据 |

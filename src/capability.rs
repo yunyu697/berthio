@@ -463,6 +463,14 @@ pub const CAPABILITIES: &[Capability] = &[
         frontend: &["api('/api/backup/restore'"],
         reason: "",
     },
+    Capability {
+        entity: "backup",
+        action: "include_audit_logs",
+        status: Status::Intentional,
+        route: None,
+        frontend: &[],
+        reason: "审计只追加、PID/升级进度属运行态；由清单显式列为排除项并写理由",
+    },
     // ---------------- 更新 ----------------
     Capability {
         entity: "update",

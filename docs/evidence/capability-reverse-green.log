@@ -1,0 +1,12 @@
+[1m[92m   Compiling[0m berthio v1.0.3-alpha3 (D:\Users\Tyler Zhang\Documents\Trae-CN\temp_20261105_04\berthio)
+[1m[92m    Finished[0m ]8;;https://doc.rust-lang.org/cargo/reference/profiles.html#default-profiles\`test` profile [unoptimized + debuginfo]]8;;\ target(s) in 7.84s
+[1m[92m     Running[0m unittests src\main.rs (D:\Users\Tyler Zhang\Documents\Trae-CN\temp_20261105_09\cargo-target\debug\deps\berthio-d371655b240d68ba.exe)
+
+running 4 tests
+test capability::tests::intentional_absent_are_documented ... ok
+test capability::tests::matrix_entries_are_unique ... ok
+test capability::tests::backend_routes_match_matrix ... ok
+test capability::tests::frontend_entries_match_matrix ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.01s
+
