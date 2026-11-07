@@ -1,0 +1,63 @@
+# GitLab 试点迁移用 CI：只做校验、构建、测试，不发布。
+# 发布仍由 GitHub Actions（.github/workflows/release.yml）负责，迁移期间不改。
+#
+# 与 GitHub ci.yml 的对应关系：
+#   version-rules  <- 版本规则反例自测 + 版本文件校验
+#   build-linux    <- cargo build --release --locked + 二进制内版本 + 内嵌前端探针
+#   test           <- cargo test --locked（含能力契约测试）
+#   shellcheck     <- 一键脚本静态检查（GitLab 侧新增，GitHub 侧没有这一项）
+#
+# GIT_DEPTH 0：check-version.sh 的 alpha 序号单调校验依赖完整 tag 历史。
+
+stages:
+  - verify
+  - build
+  - test
+
+variables:
+  CARGO_TERM_COLOR: always
+  GIT_DEPTH: "0"
+
+default:
+  image: rust:1.85-bookworm
+  before_script:
+    - rustc --version
+    - cargo --version
+
+version-rules:
+  stage: verify
+  script:
+    - bash scripts/test-check-version.sh
+    - bash scripts/check-version.sh
+
+shellcheck:
+  stage: verify
+  image: debian:bookworm-slim
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends shellcheck
+    - shellcheck --version
+  script:
+    - shellcheck -x -S warning scripts/install.sh
+    - shellcheck -x -S warning scripts/update.sh
+    - shellcheck -x -S warning scripts/uninstall.sh
+    - shellcheck -x -S warning scripts/lib/berthio-common.sh
+
+build-linux:
+  stage: build
+  script:
+    - cargo build --release --locked
+    - bash scripts/check-version.sh --binary ./target/release/berthio
+    - strings target/release/berthio | grep -q "berthio-app-bridge"
+    - test -f web/index.html
+    - test -f web/app.js
+  artifacts:
+    name: berthio-linux-x86_64
+    paths:
+      - target/release/berthio
+    expire_in: 1 day
+
+test:
+  stage: test
+  script:
+    - cargo test --locked
